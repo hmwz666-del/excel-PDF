@@ -126,11 +126,18 @@ class ExcelConverter:
         pdf_path = os.path.join(target_dir, f"{base_name}.pdf")
 
         # 处理同名文件：追加序号（兜底机制）
+        renamed = False
+        original_pdf_name = f"{base_name}.pdf"
         if os.path.exists(pdf_path):
             counter = 1
             while os.path.exists(pdf_path):
                 pdf_path = os.path.join(target_dir, f"{base_name}_{counter}.pdf")
                 counter += 1
+            renamed = True
+            logger.warning(
+                f"⚠️ 同名文件: {original_pdf_name} 已存在，"
+                f"已重命名为 {os.path.basename(pdf_path)}"
+            )
 
         workbook = None
         last_error = None
@@ -159,10 +166,16 @@ class ExcelConverter:
                     OpenAfterPublish=False,
                 )
 
-                logger.info(f"✅ 转换成功: {os.path.basename(excel_path)}")
+                if renamed:
+                    msg = f"转换成功 (同名文件 {original_pdf_name} 已重命名为 {os.path.basename(pdf_path)})"
+                    logger.info(f"✅ 转换成功: {os.path.basename(excel_path)} → {os.path.basename(pdf_path)}")
+                else:
+                    msg = "转换成功"
+                    logger.info(f"✅ 转换成功: {os.path.basename(excel_path)}")
+
                 return ConversionResult(
                     excel_path, ConversionResult.SUCCESS,
-                    "转换成功", pdf_path
+                    msg, pdf_path
                 )
 
             except com_error as e:

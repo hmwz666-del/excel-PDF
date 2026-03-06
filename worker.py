@@ -207,7 +207,10 @@ class ConversionManager:
 
                 if result.status == ConversionResult.SUCCESS:
                     success_count += 1
-                    self._log(f"✅ [{completed}/{total}] {result.filename}")
+                    if "同名文件" in result.message:
+                        self._log(f"⚠️ [{completed}/{total}] {result.filename} - {result.message}")
+                    else:
+                        self._log(f"✅ [{completed}/{total}] {result.filename}")
                 elif result.status == ConversionResult.SKIPPED:
                     skipped_count += 1
                     self._log(f"⏭️ [{completed}/{total}] {result.filename} - {result.message}")
