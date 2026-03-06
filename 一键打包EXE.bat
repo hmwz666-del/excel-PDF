@@ -29,7 +29,7 @@ echo.
 
 REM === Install build dependencies ===
 echo Installing build tools...
-%PYTHON_CMD% -m pip install pywin32 pyinstaller -q
+%PYTHON_CMD% -m pip install pywin32 pypdf pyinstaller -q
 echo [OK] Build tools ready
 echo.
 
@@ -37,7 +37,7 @@ REM === Build EXE ===
 echo Building EXE file... (1-3 minutes)
 echo.
 
-%PYTHON_CMD% -m PyInstaller -F -w --name "ExcelToPDF" --clean "%~dp0main.py"
+%PYTHON_CMD% -m PyInstaller -F -w --name "ExcelToPDF" --clean --hidden-import pypdf "%~dp0main.py"
 
 if %errorlevel% equ 0 (
     echo.
