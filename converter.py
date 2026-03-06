@@ -252,10 +252,10 @@ class ExcelConverter:
 
     def _remove_last_blank_page(self, pdf_path):
         """
-        检查并删除 PDF 最后一页（如果是空白页）
+        从 PDF 末尾循环删除所有连续的空白页
 
-        只检查最后一页，不动其他任何页面。
-        判定空白：没有可见文字 AND 没有图片。
+        从最后一页往前检查，遇到有内容的页就停止。
+        判定空白：没有可见文字 AND 没有实际图片（忽略表单/字体等 XObject）。
 
         Returns:
             True 如果删除了空白页，False 如果没有
@@ -270,37 +270,64 @@ class ExcelConverter:
             if total_pages <= 1:
                 return False
 
-            # 只检查最后一页
-            last_page = reader.pages[-1]
+            # 从末尾往前检查，找到最后一个有内容的页
+            last_content_page = total_pages - 1
 
-            # 检查是否有可见文字
-            text = last_page.extract_text() or ""
-            has_text = bool(re.search(r'[\w\u4e00-\u9fff]', text))
+            while last_content_page >= 1:  # 至少保留第1页
+                page = reader.pages[last_content_page]
 
-            # 检查是否有图片
-            has_images = False
-            try:
-                if '/Resources' in last_page:
-                    resources = last_page['/Resources']
-                    if '/XObject' in resources:
-                        xobjects = resources['/XObject']
-                        if xobjects and len(xobjects) > 0:
-                            has_images = True
-            except Exception:
-                pass
+                # 检查是否有可见文字
+                text = page.extract_text() or ""
+                has_text = bool(re.search(r'[\w\u4e00-\u9fff]', text))
 
-            # 有文字 OR 有图片 → 不是空白页，保留
-            if has_text or has_images:
+                if has_text:
+                    break  # 有文字，停止
+
+                # 检查是否有实际图片（不是表单/字体等 XObject）
+                has_real_image = False
+                try:
+                    if '/Resources' in page:
+                        resources = page['/Resources']
+                        if '/XObject' in resources:
+                            xobjects = resources['/XObject']
+                            if xobjects:
+                                for key in xobjects:
+                                    try:
+                                        xobj = xobjects[key]
+                                        obj = xobj.get_object() if hasattr(xobj, 'get_object') else xobj
+                                        # 只有 Subtype 为 /Image 的才是真正的图片
+                                        subtype = obj.get('/Subtype', '')
+                                        if subtype == '/Image':
+                                            has_real_image = True
+                                            break
+                                    except Exception:
+                                        continue
+                except Exception:
+                    pass
+
+                if has_real_image:
+                    break  # 有图片，停止
+
+                # 这一页既没有文字也没有图片 → 空白页，继续往前检查
+                logger.debug(f"  检测到空白页: 第 {last_content_page + 1} 页")
+                last_content_page -= 1
+
+            # 计算要删除的页数
+            pages_to_keep = last_content_page + 1
+            removed_count = total_pages - pages_to_keep
+
+            if removed_count <= 0:
                 return False
 
-            # 确认是空白页，删除最后一页
+            # 重建 PDF，只保留有内容的页
             writer = PdfWriter()
-            for i in range(total_pages - 1):
+            for i in range(pages_to_keep):
                 writer.add_page(reader.pages[i])
 
             with open(pdf_path, "wb") as f:
                 writer.write(f)
 
+            logger.info(f"  🗑️ 已删除末尾 {removed_count} 个空白页")
             return True
 
         except Exception as e:
