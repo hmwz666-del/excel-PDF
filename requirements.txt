@@ -1,0 +1,7 @@
+# Excel 转 PDF 批量转换工具 - 依赖清单
+#
+# 安装方式: pip install -r requirements.txt
+# 注意: 仅支持 Windows 系统
+
+pywin32>=306       # COM 自动化接口 (win32com)
+pyinstaller>=6.0   # 打包为独立 EXE
