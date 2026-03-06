@@ -243,13 +243,17 @@ class ExcelConverter:
 
                 # 设置小边距
                 page_setup = sheet.PageSetup
-                # 最小化页边距 (单位: 磅, 1英寸=72磅)
                 page_setup.LeftMargin = 7.2     # ~0.1 英寸
                 page_setup.RightMargin = 7.2
                 page_setup.TopMargin = 14.4     # ~0.2 英寸
                 page_setup.BottomMargin = 14.4
                 page_setup.HeaderMargin = 0
                 page_setup.FooterMargin = 0
+
+                # 宽度适配一页（避免行被跨页切割）
+                page_setup.Zoom = False
+                page_setup.FitToPagesWide = 1    # 宽度缩放到1页
+                page_setup.FitToPagesTall = False  # 高度不限制
             except Exception as e:
                 logger.debug(f"设置工作表 '{sheet.Name}' 边距时出错: {e}")
                 continue
