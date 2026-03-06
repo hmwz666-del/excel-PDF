@@ -162,14 +162,8 @@ class ExcelConverter:
                     CorruptLoad=1,
                 )
 
-                # 只设置边距（最小干预）
-                self._set_margins(workbook)
-
-                # 隐藏连续空白行（避免空边框行跨页）
-                self._hide_empty_rows(workbook)
-
-                # 调整分页符，防止行跨页切割
-                self._adjust_page_breaks(workbook)
+                # 预处理工作簿（根据文件类型自动选择策略）
+                self._prepare_workbook(workbook)
 
                 # 导出为 PDF
                 workbook.ExportAsFixedFormat(
@@ -234,6 +228,68 @@ class ExcelConverter:
             excel_path, ConversionResult.FAILED,
             f"转换失败: {last_error}"
         )
+
+    def _prepare_workbook(self, workbook):
+        """
+        预处理工作簿，根据文件特征选择不同策略
+
+        策略1（有手动分页符，如报关单）：
+          - 完全不修改页面设置（边距、缩放、方向等）
+          - 只隐藏连续空行
+          - 只删除数据末尾之后的多余分页符
+
+        策略2（无手动分页符，如箱单/发票）：
+          - 缩小边距
+          - 宽度适配 FitToPagesWide
+          - 隐藏连续空行
+          - 调整分页符避免行跨页
+        """
+        for sheet in workbook.Worksheets:
+            try:
+                has_manual_breaks = self._has_manual_page_breaks(sheet)
+
+                if has_manual_breaks:
+                    logger.debug(
+                        f"工作表 '{sheet.Name}': 检测到手动分页符，保持原始布局"
+                    )
+                    # 只删除数据末尾后的多余分页符
+                    self._remove_trailing_page_breaks(sheet)
+                else:
+                    logger.debug(
+                        f"工作表 '{sheet.Name}': 无手动分页符，应用优化"
+                    )
+                    # 设置小边距
+                    page_setup = sheet.PageSetup
+                    page_setup.LeftMargin = 7.2
+                    page_setup.RightMargin = 7.2
+                    page_setup.TopMargin = 14.4
+                    page_setup.BottomMargin = 14.4
+                    page_setup.HeaderMargin = 0
+                    page_setup.FooterMargin = 0
+                    # 宽度适配
+                    page_setup.Zoom = False
+                    page_setup.FitToPagesWide = 1
+                    page_setup.FitToPagesTall = False
+
+            except Exception as e:
+                logger.debug(f"预处理工作表 '{sheet.Name}' 时出错: {e}")
+                continue
+
+        # 隐藏连续空行（适用于所有文件）
+        self._hide_empty_rows(workbook)
+
+    def _has_manual_page_breaks(self, sheet):
+        """检查工作表是否有手动分页符"""
+        try:
+            for pb in sheet.HPageBreaks:
+                try:
+                    if pb.Type == 1:
+                        return True
+                except Exception:
+                    return True
+        except Exception:
+            pass
+        return False
 
     def _remove_trailing_page_breaks(self, sheet):
         """
