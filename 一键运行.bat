@@ -102,6 +102,14 @@ if %errorlevel% neq 0 (
 ) else (
     echo [OK] pywin32 ready
 )
+python -c "import pypdf" >nul 2>&1
+if %errorlevel% neq 0 (
+    echo Installing pypdf...
+    python -m pip install pypdf -q
+    echo [OK] pypdf installed
+) else (
+    echo [OK] pypdf ready
+)
 
 echo.
 echo ========================================
@@ -128,6 +136,14 @@ if %errorlevel% neq 0 (
     echo [OK] pywin32 installed
 ) else (
     echo [OK] pywin32 ready
+)
+py -c "import pypdf" >nul 2>&1
+if %errorlevel% neq 0 (
+    echo Installing pypdf...
+    py -m pip install pypdf -q
+    echo [OK] pypdf installed
+) else (
+    echo [OK] pypdf ready
 )
 
 echo.

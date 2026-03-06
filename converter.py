@@ -17,6 +17,12 @@ try:
 except ImportError:
     HAS_WIN32COM = False
 
+try:
+    from pypdf import PdfReader, PdfWriter
+    HAS_PYPDF = True
+except ImportError:
+    HAS_PYPDF = False
+
 from config import XL_TYPE_PDF, EXCEL_VISIBLE, EXCEL_ALERTS, RETRY_COUNT
 
 logger = logging.getLogger(__name__)
@@ -166,12 +172,19 @@ class ExcelConverter:
                     OpenAfterPublish=False,
                 )
 
+                # 后处理：移除空白页
+                removed = self._remove_blank_pages(pdf_path)
+
                 if renamed:
                     msg = f"转换成功 (同名文件 {original_pdf_name} 已重命名为 {os.path.basename(pdf_path)})"
                     logger.info(f"✅ 转换成功: {os.path.basename(excel_path)} → {os.path.basename(pdf_path)}")
                 else:
                     msg = "转换成功"
                     logger.info(f"✅ 转换成功: {os.path.basename(excel_path)}")
+
+                if removed > 0:
+                    msg += f" (已删除 {removed} 个空白页)"
+                    logger.info(f"   🗑️ 已删除 {removed} 个空白页")
 
                 return ConversionResult(
                     excel_path, ConversionResult.SUCCESS,
@@ -214,6 +227,56 @@ class ExcelConverter:
             excel_path, ConversionResult.FAILED,
             f"转换失败: {last_error}"
         )
+
+    def _remove_blank_pages(self, pdf_path):
+        """
+        移除 PDF 中的空白页
+
+        检测每页的文本内容，如果文本量非常少（< 10个字符）
+        则判定为空白页并删除。
+
+        Args:
+            pdf_path: PDF 文件路径
+
+        Returns:
+            被删除的空白页数量
+        """
+        if not HAS_PYPDF:
+            return 0
+
+        try:
+            reader = PdfReader(pdf_path)
+            total_pages = len(reader.pages)
+
+            if total_pages <= 1:
+                # 只有1页，不删除（避免生成空文件）
+                return 0
+
+            writer = PdfWriter()
+            removed = 0
+
+            for i, page in enumerate(reader.pages):
+                text = page.extract_text() or ""
+                # 去掉空白字符后判断
+                clean_text = text.strip()
+
+                if len(clean_text) < 5:
+                    # 空白页，跳过
+                    removed += 1
+                    logger.debug(f"  删除空白页: 第 {i+1} 页")
+                else:
+                    writer.add_page(page)
+
+            if removed > 0 and len(writer.pages) > 0:
+                # 重新写入 PDF（覆盖原文件）
+                with open(pdf_path, "wb") as f:
+                    writer.write(f)
+
+            return removed
+
+        except Exception as e:
+            logger.debug(f"移除空白页时出错: {e}")
+            return 0
 
     def _optimize_print_area(self, workbook):
         """

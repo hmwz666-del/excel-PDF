@@ -4,4 +4,5 @@
 # 注意: 仅支持 Windows 系统
 
 pywin32>=306       # COM 自动化接口 (win32com)
+pypdf>=4.0         # PDF 空白页检测和删除
 pyinstaller>=6.0   # 打包为独立 EXE
