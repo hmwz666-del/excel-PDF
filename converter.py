@@ -296,10 +296,29 @@ class ExcelConverter:
         """
         for sheet in workbook.Worksheets:
             try:
-                # 只删除数据区域之后的多余分页符（保留有意的分页符）
-                self._remove_trailing_page_breaks(sheet)
+                # 检查是否有手动分页符
+                has_manual_breaks = False
+                try:
+                    for pb in sheet.HPageBreaks:
+                        try:
+                            if pb.Type == 1:
+                                has_manual_breaks = True
+                                break
+                        except Exception:
+                            # 无法检查 Type，假设是手动分页符
+                            has_manual_breaks = True
+                            break
+                except Exception:
+                    pass
 
-                # 设置小边距
+                if has_manual_breaks:
+                    # 有手动分页符（如报关单）→ 完全不修改页面设置
+                    # 只删除数据末尾之后的多余分页符
+                    self._remove_trailing_page_breaks(sheet)
+                    logger.debug(f"工作表 '{sheet.Name}': 有手动分页符，保持原始布局")
+                    continue
+
+                # 无手动分页符 → 安全优化
                 page_setup = sheet.PageSetup
                 page_setup.LeftMargin = 7.2     # ~0.1 英寸
                 page_setup.RightMargin = 7.2
@@ -308,21 +327,9 @@ class ExcelConverter:
                 page_setup.HeaderMargin = 0
                 page_setup.FooterMargin = 0
 
-                # 只在没有手动分页符的工作表上使用宽度适配
-                # 有手动分页符的文档（如报关单）需要保持原始布局
-                has_manual_breaks = False
-                try:
-                    for pb in sheet.HPageBreaks:
-                        if pb.Type == 1:  # xlPageBreakManual = -4135, but Type=1 for manual
-                            has_manual_breaks = True
-                            break
-                except Exception:
-                    pass
-
-                if not has_manual_breaks:
-                    page_setup.Zoom = False
-                    page_setup.FitToPagesWide = 1    # 宽度缩放到1页
-                    page_setup.FitToPagesTall = False  # 高度不限制
+                page_setup.Zoom = False
+                page_setup.FitToPagesWide = 1
+                page_setup.FitToPagesTall = False
             except Exception as e:
                 logger.debug(f"设置工作表 '{sheet.Name}' 边距时出错: {e}")
                 continue
