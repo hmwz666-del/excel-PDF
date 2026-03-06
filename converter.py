@@ -63,7 +63,9 @@ class ExcelConverter:
         pythoncom.CoInitialize()
 
         try:
-            self.excel_app = win32com.client.Dispatch("Excel.Application")
+            # DispatchEx 强制创建独立的 Excel 进程（不会复用已有的 Excel）
+            # 这样用户可以在转换期间正常使用自己的 Excel
+            self.excel_app = win32com.client.DispatchEx("Excel.Application")
             self.excel_app.Visible = EXCEL_VISIBLE
             self.excel_app.DisplayAlerts = EXCEL_ALERTS
             # 禁用屏幕刷新以提升性能
