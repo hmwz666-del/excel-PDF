@@ -294,6 +294,32 @@ class ExcelConverter:
 
         return max_col
 
+    def _get_shapes_boundary(self, sheet):
+        """
+        查找工作表中浮动图片/图形对象占据的最大行列号
+
+        印章、图片等是 Shape 对象，不是单元格值。
+        通过 shape.BottomRightCell 获取图形覆盖的最大位置。
+
+        Returns:
+            (最大行号, 最大列号)
+        """
+        max_row = 0
+        max_col = 0
+        try:
+            for shape in sheet.Shapes:
+                try:
+                    bottom_cell = shape.BottomRightCell
+                    if bottom_cell.Row > max_row:
+                        max_row = bottom_cell.Row
+                    if bottom_cell.Column > max_col:
+                        max_col = bottom_cell.Column
+                except Exception:
+                    continue
+        except Exception:
+            pass
+        return max_row, max_col
+
     def _optimize_print_area(self, workbook):
         """
         优化每个工作表的打印区域和页面布局
@@ -312,17 +338,22 @@ class ExcelConverter:
                     continue
 
                 # ===== 精确定位数据范围 =====
-                last_row = self._get_data_last_row(sheet)
-                last_col = self._get_data_last_col(sheet)
+                data_last_row = self._get_data_last_row(sheet)
+                data_last_col = self._get_data_last_col(sheet)
+
+                # 检查浮动图片/图形的位置（印章等）
+                shapes_last_row, shapes_last_col = self._get_shapes_boundary(sheet)
+
+                # 取数据和图形的最大边界
+                last_row = max(data_last_row, shapes_last_row)
+                last_col = max(data_last_col, shapes_last_col)
 
                 if last_row == 0 or last_col == 0:
-                    # 工作表没有任何数据值，隐藏
                     if workbook.Worksheets.Count > 1:
                         sheet.Visible = False
                     continue
 
                 # ===== 设置精确的打印区域 =====
-                # 从第1行第1列开始，到最后有数据的行/列结束
                 print_range = sheet.Range(
                     sheet.Cells(1, 1),
                     sheet.Cells(last_row, last_col)
@@ -331,8 +362,9 @@ class ExcelConverter:
 
                 logger.debug(
                     f"工作表 '{sheet.Name}': "
-                    f"UsedRange={used_range.Rows.Count}行x{used_range.Columns.Count}列, "
-                    f"实际数据={last_row}行x{last_col}列"
+                    f"数据={data_last_row}行x{data_last_col}列, "
+                    f"图形={shapes_last_row}行x{shapes_last_col}列, "
+                    f"最终={last_row}行x{last_col}列"
                 )
 
                 # ===== 优化页面布局 =====
