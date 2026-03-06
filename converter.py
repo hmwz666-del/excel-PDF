@@ -308,10 +308,21 @@ class ExcelConverter:
                 page_setup.HeaderMargin = 0
                 page_setup.FooterMargin = 0
 
-                # 宽度适配一页（避免行被跨页切割）
-                page_setup.Zoom = False
-                page_setup.FitToPagesWide = 1    # 宽度缩放到1页
-                page_setup.FitToPagesTall = False  # 高度不限制
+                # 只在没有手动分页符的工作表上使用宽度适配
+                # 有手动分页符的文档（如报关单）需要保持原始布局
+                has_manual_breaks = False
+                try:
+                    for pb in sheet.HPageBreaks:
+                        if pb.Type == 1:  # xlPageBreakManual = -4135, but Type=1 for manual
+                            has_manual_breaks = True
+                            break
+                except Exception:
+                    pass
+
+                if not has_manual_breaks:
+                    page_setup.Zoom = False
+                    page_setup.FitToPagesWide = 1    # 宽度缩放到1页
+                    page_setup.FitToPagesTall = False  # 高度不限制
             except Exception as e:
                 logger.debug(f"设置工作表 '{sheet.Name}' 边距时出错: {e}")
                 continue
