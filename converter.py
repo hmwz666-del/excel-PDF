@@ -165,6 +165,9 @@ class ExcelConverter:
                 # 只设置边距（最小干预）
                 self._set_margins(workbook)
 
+                # 隐藏连续空白行（避免空边框行跨页）
+                self._hide_empty_rows(workbook)
+
                 # 调整分页符，防止行跨页切割
                 self._adjust_page_breaks(workbook)
 
@@ -259,6 +262,78 @@ class ExcelConverter:
                 page_setup.FitToPagesTall = False  # 高度不限制
             except Exception as e:
                 logger.debug(f"设置工作表 '{sheet.Name}' 边距时出错: {e}")
+                continue
+
+    def _hide_empty_rows(self, workbook):
+        """
+        隐藏连续的空白行（只有空字符串和边框，无可见内容）
+
+        很多 Excel 模板在数据区和汇总区之间有大量空行，
+        这些行的单元格值是空字符串 '' 而非 None，
+        导致 Excel 认为它们有数据并打印出来。
+
+        规则：连续 3 行以上的"全空行"（所有值都是 None 或空字符串），
+        整批隐藏。保留单独的空行（可能是有意的间距）。
+        """
+        for sheet in workbook.Worksheets:
+            try:
+                used_range = sheet.UsedRange
+                if used_range is None:
+                    continue
+
+                total_rows = used_range.Rows.Count
+                start_row = used_range.Row
+                total_cols = min(used_range.Columns.Count, 30)
+                start_col = used_range.Column
+
+                # 扫描所有行，标记哪些是"视觉空行"
+                empty_runs = []   # [(start, end), ...]
+                current_run_start = None
+
+                for r in range(start_row, start_row + total_rows):
+                    is_visually_empty = True
+                    for c in range(start_col, start_col + total_cols):
+                        try:
+                            val = sheet.Cells(r, c).Value
+                            if val is not None and str(val).strip() != '':
+                                is_visually_empty = False
+                                break
+                        except Exception:
+                            continue
+
+                    if is_visually_empty:
+                        if current_run_start is None:
+                            current_run_start = r
+                    else:
+                        if current_run_start is not None:
+                            run_length = r - current_run_start
+                            if run_length >= 3:
+                                empty_runs.append((current_run_start, r - 1))
+                            current_run_start = None
+
+                # 处理末尾的连续空行
+                if current_run_start is not None:
+                    run_length = (start_row + total_rows) - current_run_start
+                    if run_length >= 3:
+                        empty_runs.append((current_run_start, start_row + total_rows - 1))
+
+                # 隐藏连续空行
+                for run_start, run_end in empty_runs:
+                    try:
+                        hide_range = sheet.Range(
+                            sheet.Rows(run_start),
+                            sheet.Rows(run_end)
+                        )
+                        hide_range.Hidden = True
+                        logger.debug(
+                            f"工作表 '{sheet.Name}': "
+                            f"隐藏空行 {run_start}-{run_end} ({run_end - run_start + 1} 行)"
+                        )
+                    except Exception:
+                        continue
+
+            except Exception as e:
+                logger.debug(f"检测工作表 '{sheet.Name}' 空行时出错: {e}")
                 continue
 
     def _adjust_page_breaks(self, workbook):
