@@ -231,13 +231,17 @@ class ExcelConverter:
 
     def _set_margins(self, workbook):
         """
-        只设置页边距，不修改任何其他页面设置
+        设置小边距 + 删除手动分页符
 
-        这是唯一安全的优化：缩小边距让内容有更多空间。
-        不动 PrintArea / Orientation / Zoom / FitToPages。
+        - 删除手动分页符：避免分页符在数据结束位置产生空白页
+        - 缩小边距：让内容有更多空间
         """
         for sheet in workbook.Worksheets:
             try:
+                # 删除所有手动分页符（空白页的根因）
+                sheet.ResetAllPageBreaks()
+
+                # 设置小边距
                 page_setup = sheet.PageSetup
                 # 最小化页边距 (单位: 磅, 1英寸=72磅)
                 page_setup.LeftMargin = 7.2     # ~0.1 英寸
