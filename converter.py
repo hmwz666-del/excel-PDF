@@ -235,17 +235,69 @@ class ExcelConverter:
             f"转换失败: {last_error}"
         )
 
+    def _remove_trailing_page_breaks(self, sheet):
+        """
+        只删除最后有可见数据的行之后的手动分页符
+
+        有些 Excel 文件（如报关单）在数据区域内有有意的手动分页符，
+        不能用 ResetAllPageBreaks() 全部删除。
+        只删除数据结束后的多余分页符（这些才是产生空白页的原因）。
+        """
+        try:
+            # 找最后一行有可见内容的行号
+            used = sheet.UsedRange
+            if used is None:
+                return
+
+            last_visible_row = 0
+            total_rows = used.Rows.Count
+            start_row = used.Row
+            total_cols = min(used.Columns.Count, 30)
+            start_col = used.Column
+
+            # 从最后一行往上找第一行有可见内容的行
+            for r in range(start_row + total_rows - 1, start_row - 1, -1):
+                has_visible = False
+                for c in range(start_col, start_col + total_cols):
+                    try:
+                        val = sheet.Cells(r, c).Value
+                        if val is not None and str(val).strip() != '':
+                            has_visible = True
+                            break
+                    except Exception:
+                        continue
+                if has_visible:
+                    last_visible_row = r
+                    break
+
+            if last_visible_row == 0:
+                return
+
+            # 从后往前删除位于 last_visible_row 之后的手动分页符
+            breaks = sheet.HPageBreaks
+            for i in range(breaks.Count, 0, -1):
+                try:
+                    pb = breaks(i)
+                    if pb.Location.Row > last_visible_row:
+                        pb.Delete()
+                except Exception:
+                    continue
+
+        except Exception as e:
+            logger.debug(f"删除尾部分页符时出错: {e}")
+
     def _set_margins(self, workbook):
         """
-        设置小边距 + 删除手动分页符
+        设置小边距 + 删除尾部多余分页符
 
-        - 删除手动分页符：避免分页符在数据结束位置产生空白页
+        - 删除数据末尾之后的手动分页符（避免空白页）
+        - 保留数据区域内的分页符（如报关单的有意分页）
         - 缩小边距：让内容有更多空间
         """
         for sheet in workbook.Worksheets:
             try:
-                # 删除所有手动分页符（空白页的根因）
-                sheet.ResetAllPageBreaks()
+                # 只删除数据区域之后的多余分页符（保留有意的分页符）
+                self._remove_trailing_page_breaks(sheet)
 
                 # 设置小边距
                 page_setup = sheet.PageSetup
