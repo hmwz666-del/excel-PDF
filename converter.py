@@ -94,13 +94,14 @@ class ExcelConverter:
         self._initialized = False
         logger.info("Excel COM 实例已清理")
 
-    def convert_file(self, excel_path, output_dir):
+    def convert_file(self, excel_path, output_dir, input_dir=None):
         """
         将单个 Excel 文件转换为 PDF
 
         Args:
             excel_path: Excel 文件的绝对路径
             output_dir: PDF 输出目录的绝对路径
+            input_dir: 输入根目录（用于保留子目录结构）
 
         Returns:
             ConversionResult 对象
@@ -111,15 +112,24 @@ class ExcelConverter:
                 "转换器未初始化"
             )
 
-        # 构建输出路径
+        # 构建输出路径（保留子目录结构，避免不同文件夹的同名文件冲突）
         base_name = os.path.splitext(os.path.basename(excel_path))[0]
-        pdf_path = os.path.join(output_dir, f"{base_name}.pdf")
 
-        # 处理同名文件
+        # 如果有 input_dir，保留相对子目录结构
+        if input_dir:
+            rel_dir = os.path.relpath(os.path.dirname(excel_path), input_dir)
+            target_dir = os.path.join(output_dir, rel_dir) if rel_dir != '.' else output_dir
+            os.makedirs(target_dir, exist_ok=True)
+        else:
+            target_dir = output_dir
+
+        pdf_path = os.path.join(target_dir, f"{base_name}.pdf")
+
+        # 处理同名文件：追加序号（兜底机制）
         if os.path.exists(pdf_path):
             counter = 1
             while os.path.exists(pdf_path):
-                pdf_path = os.path.join(output_dir, f"{base_name}_{counter}.pdf")
+                pdf_path = os.path.join(target_dir, f"{base_name}_{counter}.pdf")
                 counter += 1
 
         workbook = None

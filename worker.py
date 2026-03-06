@@ -50,10 +50,10 @@ def worker_process(task_queue, result_queue, worker_id):
             if task is None:
                 break
 
-            excel_path, output_dir = task
+            excel_path, output_dir, input_dir = task
 
             try:
-                result = converter.convert_file(excel_path, output_dir)
+                result = converter.convert_file(excel_path, output_dir, input_dir)
                 result_queue.put(result)
             except Exception as e:
                 result = ConversionResult(
@@ -69,7 +69,7 @@ def worker_process(task_queue, result_queue, worker_id):
             try:
                 task = task_queue.get_nowait()
                 if task is not None:
-                    excel_path, output_dir = task
+                    excel_path, output_dir, input_dir = task
                     result_queue.put(ConversionResult(
                         excel_path, ConversionResult.FAILED,
                         f"工作进程启动失败: {str(e)}"
@@ -167,7 +167,7 @@ class ConversionManager:
 
         # 填充任务队列
         for filepath in files:
-            task_queue.put((filepath, output_dir))
+            task_queue.put((filepath, output_dir, input_dir))
 
         # 添加终止信号（每个 worker 一个）
         actual_workers = min(self.num_workers, total)
