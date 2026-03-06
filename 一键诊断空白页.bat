@@ -30,5 +30,5 @@ if %errorlevel% neq 0 (
     %PYTHON_CMD% -m pip install pypdf -q
 )
 
-%PYTHON_CMD% "%~dp0诊断空白页.py"
+%PYTHON_CMD% "%~dp0diagnose.py"
 pause
