@@ -192,45 +192,100 @@ class ExcelConverter:
 
     def _optimize_print_area(self, workbook):
         """
-        优化每个工作表的打印区域，避免空白页
+        优化每个工作表的打印区域，避免空白页和多余留白
 
-        遍历所有工作表，将打印区域设置为 UsedRange（实际有内容的区域），
-        并调整页面设置以获得最佳布局。
+        使用 Cells.Find 精准查找实际有数据内容的最后行/列，
+        排除仅有边框/格式但无数据的空行空列。
         """
         for sheet in workbook.Worksheets:
             try:
-                used_range = sheet.UsedRange
-                if used_range is None or used_range.Count == 0:
-                    # 空工作表，设置为不可见以避免打印空白页
+                # ===== 第一步：查找实际有数据的范围 =====
+                # 使用 Find 方法查找最后一个有数据的单元格
+                # 这比 UsedRange 更精准，不会把仅有边框格式的空行算进去
+
+                # 查找最后有数据的行 (按行搜索, 从末尾往前找)
+                last_row_cell = sheet.Cells.Find(
+                    What="*",
+                    SearchOrder=1,       # xlByRows
+                    SearchDirection=2,   # xlPrevious
+                    LookIn=-4163,        # xlValues (按值查找,忽略格式)
+                )
+
+                if last_row_cell is None:
+                    # 整个工作表没有任何数据内容
                     if workbook.Worksheets.Count > 1:
                         sheet.Visible = False
                     continue
 
-                # 设置打印区域为实际使用区域
-                sheet.PageSetup.PrintArea = used_range.Address
+                last_row = last_row_cell.Row
 
-                # 自适应页面设置
+                # 查找最后有数据的列 (按列搜索, 从末尾往前找)
+                last_col_cell = sheet.Cells.Find(
+                    What="*",
+                    SearchOrder=2,       # xlByColumns
+                    SearchDirection=2,   # xlPrevious
+                    LookIn=-4163,        # xlValues
+                )
+                last_col = last_col_cell.Column if last_col_cell else 1
+
+                # 查找第一个有数据的行 (从开头往后找)
+                first_row_cell = sheet.Cells.Find(
+                    What="*",
+                    SearchOrder=1,       # xlByRows
+                    SearchDirection=1,   # xlNext
+                    LookIn=-4163,        # xlValues
+                )
+                first_row = first_row_cell.Row if first_row_cell else 1
+
+                # 查找第一个有数据的列
+                first_col_cell = sheet.Cells.Find(
+                    What="*",
+                    SearchOrder=2,       # xlByColumns
+                    SearchDirection=1,   # xlNext
+                    LookIn=-4163,        # xlValues
+                )
+                first_col = first_col_cell.Column if first_col_cell else 1
+
+                # 从第1行开始(保留表头),列从第1列开始
+                start_row = min(first_row, 1)
+                start_col = min(first_col, 1)
+
+                # ===== 第二步：设置精准打印区域 =====
+                print_range = sheet.Range(
+                    sheet.Cells(start_row, start_col),
+                    sheet.Cells(last_row, last_col)
+                )
+                sheet.PageSetup.PrintArea = print_range.Address
+
+                logger.debug(
+                    f"工作表 '{sheet.Name}': 打印区域 "
+                    f"Row {start_row}-{last_row}, Col {start_col}-{last_col}"
+                )
+
+                # ===== 第三步：优化页面布局 =====
                 page_setup = sheet.PageSetup
 
-                # 自动判断横向/纵向：列多行少用横向，否则纵向
-                cols = used_range.Columns.Count
-                rows = used_range.Rows.Count
-
-                if cols > 8:
-                    page_setup.Orientation = 2  # xlLandscape
+                # 自动判断横向/纵向
+                if last_col > 8:
+                    page_setup.Orientation = 2  # xlLandscape (横向)
                 else:
-                    page_setup.Orientation = 1  # xlPortrait
+                    page_setup.Orientation = 1  # xlPortrait (纵向)
 
-                # 自动缩放以适应页面宽度
-                page_setup.Zoom = False  # 关闭固定缩放
-                page_setup.FitToPagesWide = 1   # 宽度适应1页
-                page_setup.FitToPagesTall = False  # 高度不限制
+                # 自动缩放适配页面宽度 (关键: 内容填满页宽)
+                page_setup.Zoom = False
+                page_setup.FitToPagesWide = 1    # 宽度缩放到1页
+                page_setup.FitToPagesTall = False  # 高度不限制,自动分页
 
-                # 设置合理的页边距（单位：英寸）
-                page_setup.LeftMargin = 18    # 约 0.25 英寸
-                page_setup.RightMargin = 18
-                page_setup.TopMargin = 36     # 约 0.5 英寸
-                page_setup.BottomMargin = 36
+                # 最小化页边距 (单位: 磅, 1英寸=72磅)
+                page_setup.LeftMargin = 7.2     # 约 0.1 英寸
+                page_setup.RightMargin = 7.2    # 约 0.1 英寸
+                page_setup.TopMargin = 14.4     # 约 0.2 英寸
+                page_setup.BottomMargin = 14.4  # 约 0.2 英寸
+                page_setup.HeaderMargin = 0
+                page_setup.FooterMargin = 0
+
+                # 水平居中打印
+                page_setup.CenterHorizontally = True
 
             except Exception as e:
                 # 某个工作表设置失败不影响整体转换
