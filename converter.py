@@ -50,13 +50,16 @@ class ExcelConverter:
     """
     Excel 转 PDF 转换器
 
-    管理一个 Excel COM 实例，负责文件的打开、打印区域设置和 PDF 导出。
+    管理一个 Excel COM 实例，负责文件的打开、边距优化和 PDF 导出。
     设计为在单独的进程中运行（COM 对象不能跨线程共享）。
-    """
 
-    # Excel COM 常量
-    XL_UP = -4162       # xlUp
-    XL_TO_LEFT = -4159  # xlToLeft
+    策略：最小干预
+    - 不修改 PrintArea（避免内容丢失/断页）
+    - 不修改 Orientation（尊重原文件设置）
+    - 不修改 Zoom/FitToPages（尊重原文件设置）
+    - 只设置小边距（安全优化）
+    - 导出后用 pypdf 删除末尾空白页
+    """
 
     def __init__(self):
         self.excel_app = None
@@ -70,16 +73,13 @@ class ExcelConverter:
                 "并已安装 pywin32: pip install pywin32"
             )
 
-        # 初始化当前线程的 COM 环境
         pythoncom.CoInitialize()
 
         try:
-            # DispatchEx 强制创建独立的 Excel 进程（不会复用已有的 Excel）
-            # 这样用户可以在转换期间正常使用自己的 Excel
+            # DispatchEx 创建独立 Excel 进程，不影响用户正在使用的 Excel
             self.excel_app = win32com.client.DispatchEx("Excel.Application")
             self.excel_app.Visible = EXCEL_VISIBLE
             self.excel_app.DisplayAlerts = EXCEL_ALERTS
-            # 禁用屏幕刷新以提升性能
             self.excel_app.ScreenUpdating = False
             self._initialized = True
             logger.info("Excel COM 实例初始化成功")
@@ -123,10 +123,9 @@ class ExcelConverter:
                 "转换器未初始化"
             )
 
-        # 构建输出路径（保留子目录结构，避免不同文件夹的同名文件冲突）
+        # 构建输出路径（保留子目录结构）
         base_name = os.path.splitext(os.path.basename(excel_path))[0]
 
-        # 如果有 input_dir，保留相对子目录结构
         if input_dir:
             rel_dir = os.path.relpath(os.path.dirname(excel_path), input_dir)
             target_dir = os.path.join(output_dir, rel_dir) if rel_dir != '.' else output_dir
@@ -136,7 +135,7 @@ class ExcelConverter:
 
         pdf_path = os.path.join(target_dir, f"{base_name}.pdf")
 
-        # 处理同名文件：追加序号（兜底机制）
+        # 处理同名文件
         renamed = False
         original_pdf_name = f"{base_name}.pdf"
         if os.path.exists(pdf_path):
@@ -155,30 +154,29 @@ class ExcelConverter:
 
         for attempt in range(RETRY_COUNT + 1):
             try:
-                # 以只读方式打开工作簿
                 workbook = self.excel_app.Workbooks.Open(
                     os.path.abspath(excel_path),
                     ReadOnly=True,
-                    UpdateLinks=0,       # 不更新外部链接
+                    UpdateLinks=0,
                     IgnoreReadOnlyRecommended=True,
-                    CorruptLoad=1,       # 尝试修复打开
+                    CorruptLoad=1,
                 )
 
-                # 优化打印区域和页面布局
-                self._optimize_print_area(workbook)
+                # 只设置边距（最小干预）
+                self._set_margins(workbook)
 
                 # 导出为 PDF
                 workbook.ExportAsFixedFormat(
                     Type=XL_TYPE_PDF,
                     Filename=os.path.abspath(pdf_path),
-                    Quality=0,           # 标准质量 (xlQualityStandard)
+                    Quality=0,
                     IncludeDocProperties=True,
                     IgnorePrintAreas=False,
                     OpenAfterPublish=False,
                 )
 
-                # 后处理：移除空白页
-                removed = self._remove_blank_pages(pdf_path)
+                # 后处理：删除末尾空白页
+                removed = self._remove_last_blank_page(pdf_path)
 
                 if renamed:
                     msg = f"转换成功 (同名文件 {original_pdf_name} 已重命名为 {os.path.basename(pdf_path)})"
@@ -187,9 +185,9 @@ class ExcelConverter:
                     msg = "转换成功"
                     logger.info(f"✅ 转换成功: {os.path.basename(excel_path)}")
 
-                if removed > 0:
-                    msg += f" (已删除 {removed} 个空白页)"
-                    logger.info(f"   🗑️ 已删除 {removed} 个空白页")
+                if removed:
+                    msg += " (已删除末尾空白页)"
+                    logger.info(f"   🗑️ 已删除末尾空白页")
 
                 return ConversionResult(
                     excel_path, ConversionResult.SUCCESS,
@@ -200,7 +198,6 @@ class ExcelConverter:
                 last_error = str(e)
                 error_code = getattr(e, 'hresult', None)
 
-                # 密码保护的文件
                 if error_code and (error_code == -2147352567 or "password" in str(e).lower()):
                     logger.warning(f"⏭️ 跳过密码保护文件: {os.path.basename(excel_path)}")
                     return ConversionResult(
@@ -219,7 +216,6 @@ class ExcelConverter:
                     continue
 
             finally:
-                # 确保工作簿被关闭
                 if workbook is not None:
                     try:
                         workbook.Close(SaveChanges=False)
@@ -233,227 +229,83 @@ class ExcelConverter:
             f"转换失败: {last_error}"
         )
 
-    # ==================== 打印区域优化 ====================
-
-    def _get_data_last_row(self, sheet):
+    def _set_margins(self, workbook):
         """
-        查找工作表中最后有数据的行号
+        只设置页边距，不修改任何其他页面设置
 
-        使用 Cells(Rows.Count, col).End(xlUp) —— 这是 Excel VBA 标准做法：
-        从每列的最底行向上搜索，找到第一个有值的单元格。
-        此方法只看单元格值，完全忽略格式/边框，且不受 Find 的 After 参数 Bug 影响。
-
-        Returns:
-            最后有数据的行号；无数据返回 0
-        """
-        used_range = sheet.UsedRange
-        if used_range is None:
-            return 0
-
-        max_row = 0
-        start_col = used_range.Column
-        num_cols = min(used_range.Columns.Count, 100)
-
-        for i in range(num_cols):
-            col = start_col + i
-            try:
-                last_cell = sheet.Cells(sheet.Rows.Count, col).End(self.XL_UP)
-                if last_cell.Value is not None and last_cell.Row > max_row:
-                    max_row = last_cell.Row
-            except Exception:
-                continue
-
-        return max_row
-
-    def _get_data_last_col(self, sheet):
-        """
-        查找工作表中最后有数据的列号
-
-        使用 Cells(row, Columns.Count).End(xlToLeft) 方法。
-
-        Returns:
-            最后有数据的列号；无数据返回 0
-        """
-        used_range = sheet.UsedRange
-        if used_range is None:
-            return 0
-
-        max_col = 0
-        start_row = used_range.Row
-        # 不需要检查所有行，抽样检查前 200 行足够
-        num_rows = min(used_range.Rows.Count, 200)
-
-        for i in range(num_rows):
-            row = start_row + i
-            try:
-                last_cell = sheet.Cells(row, sheet.Columns.Count).End(self.XL_TO_LEFT)
-                if last_cell.Value is not None and last_cell.Column > max_col:
-                    max_col = last_cell.Column
-            except Exception:
-                continue
-
-        return max_col
-
-    def _get_shapes_boundary(self, sheet):
-        """
-        查找工作表中浮动图片/图形对象占据的最大行列号
-
-        印章、图片等是 Shape 对象，不是单元格值。
-        通过 shape.BottomRightCell 获取图形覆盖的最大位置。
-
-        Returns:
-            (最大行号, 最大列号)
-        """
-        max_row = 0
-        max_col = 0
-        try:
-            for shape in sheet.Shapes:
-                try:
-                    bottom_cell = shape.BottomRightCell
-                    if bottom_cell.Row > max_row:
-                        max_row = bottom_cell.Row
-                    if bottom_cell.Column > max_col:
-                        max_col = bottom_cell.Column
-                except Exception:
-                    continue
-        except Exception:
-            pass
-        return max_row, max_col
-
-    def _optimize_print_area(self, workbook):
-        """
-        优化每个工作表的打印区域和页面布局
-
-        核心逻辑：
-        1. 用 End(xlUp)/End(xlToLeft) 精确定位最后有数据的行/列
-        2. 设置 PrintArea 只包含有数据的区域（排除空行空列）
-        3. 优化页面边距、方向、缩放
+        这是唯一安全的优化：缩小边距让内容有更多空间。
+        不动 PrintArea / Orientation / Zoom / FitToPages。
         """
         for sheet in workbook.Worksheets:
             try:
-                used_range = sheet.UsedRange
-                if used_range is None or used_range.Count == 0:
-                    if workbook.Worksheets.Count > 1:
-                        sheet.Visible = False
-                    continue
-
-                # ===== 精确定位数据范围 =====
-                data_last_row = self._get_data_last_row(sheet)
-                data_last_col = self._get_data_last_col(sheet)
-
-                # 检查浮动图片/图形的位置（印章等）
-                shapes_last_row, shapes_last_col = self._get_shapes_boundary(sheet)
-
-                # 取数据和图形的最大边界
-                last_row = max(data_last_row, shapes_last_row)
-                last_col = max(data_last_col, shapes_last_col)
-
-                if last_row == 0 or last_col == 0:
-                    if workbook.Worksheets.Count > 1:
-                        sheet.Visible = False
-                    continue
-
-                # ===== 设置精确的打印区域 =====
-                print_range = sheet.Range(
-                    sheet.Cells(1, 1),
-                    sheet.Cells(last_row, last_col)
-                )
-                sheet.PageSetup.PrintArea = print_range.Address
-
-                logger.debug(
-                    f"工作表 '{sheet.Name}': "
-                    f"数据={data_last_row}行x{data_last_col}列, "
-                    f"图形={shapes_last_row}行x{shapes_last_col}列, "
-                    f"最终={last_row}行x{last_col}列"
-                )
-
-                # ===== 优化页面布局 =====
                 page_setup = sheet.PageSetup
-
-                if last_col > 8:
-                    page_setup.Orientation = 2  # xlLandscape
-                else:
-                    page_setup.Orientation = 1  # xlPortrait
-
-                page_setup.Zoom = False
-                page_setup.FitToPagesWide = 1
-                page_setup.FitToPagesTall = False
-
+                # 最小化页边距 (单位: 磅, 1英寸=72磅)
                 page_setup.LeftMargin = 7.2     # ~0.1 英寸
                 page_setup.RightMargin = 7.2
                 page_setup.TopMargin = 14.4     # ~0.2 英寸
                 page_setup.BottomMargin = 14.4
                 page_setup.HeaderMargin = 0
                 page_setup.FooterMargin = 0
-
-                page_setup.CenterHorizontally = True
-
             except Exception as e:
-                logger.debug(f"设置工作表 '{sheet.Name}' 打印区域时出错: {e}")
+                logger.debug(f"设置工作表 '{sheet.Name}' 边距时出错: {e}")
                 continue
 
-    # ==================== PDF 空白页移除 ====================
-
-    def _remove_blank_pages(self, pdf_path):
+    def _remove_last_blank_page(self, pdf_path):
         """
-        移除 PDF 中的空白页（双重检测）
+        检查并删除 PDF 最后一页（如果是空白页）
 
-        检测逻辑：
-        - 提取文本，检查是否有可见字符（字母/数字/中文）
-        - 检查页面是否包含图片
-        - 没有文字 AND 没有图片 → 删除
+        只检查最后一页，不动其他任何页面。
+        判定空白：没有可见文字 AND 没有图片。
 
         Returns:
-            被删除的空白页数量
+            True 如果删除了空白页，False 如果没有
         """
         if not HAS_PYPDF:
-            return 0
+            return False
 
         try:
             reader = PdfReader(pdf_path)
             total_pages = len(reader.pages)
 
             if total_pages <= 1:
-                return 0
+                return False
 
+            # 只检查最后一页
+            last_page = reader.pages[-1]
+
+            # 检查是否有可见文字
+            text = last_page.extract_text() or ""
+            has_text = bool(re.search(r'[\w\u4e00-\u9fff]', text))
+
+            # 检查是否有图片
+            has_images = False
+            try:
+                if '/Resources' in last_page:
+                    resources = last_page['/Resources']
+                    if '/XObject' in resources:
+                        xobjects = resources['/XObject']
+                        if xobjects and len(xobjects) > 0:
+                            has_images = True
+            except Exception:
+                pass
+
+            # 有文字 OR 有图片 → 不是空白页，保留
+            if has_text or has_images:
+                return False
+
+            # 确认是空白页，删除最后一页
             writer = PdfWriter()
-            removed = 0
+            for i in range(total_pages - 1):
+                writer.add_page(reader.pages[i])
 
-            for i, page in enumerate(reader.pages):
-                # 检测1: 是否有可见文字
-                text = page.extract_text() or ""
-                has_text = bool(re.search(r'[\w\u4e00-\u9fff]', text))
+            with open(pdf_path, "wb") as f:
+                writer.write(f)
 
-                # 检测2: 是否有图片
-                has_images = False
-                try:
-                    if '/Resources' in page:
-                        resources = page['/Resources']
-                        if '/XObject' in resources:
-                            xobjects = resources['/XObject']
-                            if xobjects and len(xobjects) > 0:
-                                has_images = True
-                except Exception:
-                    pass
-
-                # 有文字 OR 有图片 → 保留
-                if has_text or has_images:
-                    writer.add_page(page)
-                else:
-                    removed += 1
-                    logger.debug(f"  删除空白页: 第 {i+1} 页")
-
-            if removed > 0 and len(writer.pages) > 0:
-                with open(pdf_path, "wb") as f:
-                    writer.write(f)
-
-            return removed
+            return True
 
         except Exception as e:
-            logger.debug(f"移除空白页时出错: {e}")
-            return 0
-
-    # ==================== 上下文管理器 ====================
+            logger.debug(f"检查末尾空白页时出错: {e}")
+            return False
 
     def __enter__(self):
         self.initialize()
