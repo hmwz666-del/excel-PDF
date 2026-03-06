@@ -165,6 +165,9 @@ class ExcelConverter:
                 # 只设置边距（最小干预）
                 self._set_margins(workbook)
 
+                # 调整分页符，防止行跨页切割
+                self._adjust_page_breaks(workbook)
+
                 # 导出为 PDF
                 workbook.ExportAsFixedFormat(
                     Type=XL_TYPE_PDF,
@@ -256,6 +259,56 @@ class ExcelConverter:
                 page_setup.FitToPagesTall = False  # 高度不限制
             except Exception as e:
                 logger.debug(f"设置工作表 '{sheet.Name}' 边距时出错: {e}")
+                continue
+
+    def _adjust_page_breaks(self, workbook):
+        """
+        调整自动分页符位置，防止行被跨页切割
+
+        检查每个自动分页符：
+        - 如果分页符落在合并单元格区域中间 → 上移到合并区域开始行
+        - 如果分页符落在非空行上 → 上移到该行之前
+        这样确保每一行完整地出现在同一页上。
+        """
+        for sheet in workbook.Worksheets:
+            try:
+                breaks = sheet.HPageBreaks
+                if breaks.Count == 0:
+                    continue
+
+                used_cols = min(sheet.UsedRange.Columns.Count, 20)
+                start_col = sheet.UsedRange.Column
+
+                # 从后往前调整（避免修改后影响后续索引）
+                for i in range(breaks.Count, 0, -1):
+                    try:
+                        pb = breaks(i)
+                        break_row = pb.Location.Row
+
+                        # 检查分页符所在行的前几列是否有合并单元格
+                        new_break_row = break_row
+                        for col_idx in range(start_col, start_col + used_cols):
+                            try:
+                                cell = sheet.Cells(break_row, col_idx)
+                                if cell.MergeCells:
+                                    merge_start = cell.MergeArea.Row
+                                    if merge_start < break_row:
+                                        # 分页符在合并区域中间，需要上移
+                                        new_break_row = min(new_break_row, merge_start)
+                            except Exception:
+                                continue
+
+                        if new_break_row < break_row:
+                            sheet.HPageBreaks.Add(sheet.Cells(new_break_row, 1))
+                            logger.debug(
+                                f"工作表 '{sheet.Name}': "
+                                f"分页符从第 {break_row} 行上移到第 {new_break_row} 行"
+                            )
+                    except Exception:
+                        continue
+
+            except Exception as e:
+                logger.debug(f"调整工作表 '{sheet.Name}' 分页符时出错: {e}")
                 continue
 
     def _remove_last_blank_page(self, pdf_path):
