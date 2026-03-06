@@ -6,6 +6,7 @@ Excel 转 PDF 批量转换工具 - 核心转换引擎
 """
 
 import os
+import re
 import logging
 import traceback
 
@@ -257,10 +258,11 @@ class ExcelConverter:
 
             for i, page in enumerate(reader.pages):
                 text = page.extract_text() or ""
-                # 只删除完全没有任何内容的页面
-                clean_text = text.strip()
+                # 检查是否包含任何可见字符（字母、数字、中文等）
+                # 只有完全没有任何可见字符的页面才删除
+                has_visible_content = bool(re.search(r'[\w\u4e00-\u9fff]', text))
 
-                if len(clean_text) == 0:
+                if not has_visible_content:
                     # 空白页，跳过
                     removed += 1
                     logger.debug(f"  删除空白页: 第 {i+1} 页")
