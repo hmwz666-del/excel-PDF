@@ -265,6 +265,7 @@ class ExcelConverter:
             True 如果删除了空白页，False 如果没有
         """
         if not HAS_PYPDF:
+            logger.warning("⚠️ pypdf 未安装，无法自动删除空白页。请运行: pip install pypdf")
             return False
 
         try:
