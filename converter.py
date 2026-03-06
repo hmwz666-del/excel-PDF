@@ -54,6 +54,10 @@ class ExcelConverter:
     设计为在单独的进程中运行（COM 对象不能跨线程共享）。
     """
 
+    # Excel COM 常量
+    XL_UP = -4162       # xlUp
+    XL_TO_LEFT = -4159  # xlToLeft
+
     def __init__(self):
         self.excel_app = None
         self._initialized = False
@@ -160,7 +164,7 @@ class ExcelConverter:
                     CorruptLoad=1,       # 尝试修复打开
                 )
 
-                # 处理每个有内容的工作表的打印区域
+                # 优化打印区域和页面布局
                 self._optimize_print_area(workbook)
 
                 # 导出为 PDF
@@ -229,15 +233,143 @@ class ExcelConverter:
             f"转换失败: {last_error}"
         )
 
+    # ==================== 打印区域优化 ====================
+
+    def _get_data_last_row(self, sheet):
+        """
+        查找工作表中最后有数据的行号
+
+        使用 Cells(Rows.Count, col).End(xlUp) —— 这是 Excel VBA 标准做法：
+        从每列的最底行向上搜索，找到第一个有值的单元格。
+        此方法只看单元格值，完全忽略格式/边框，且不受 Find 的 After 参数 Bug 影响。
+
+        Returns:
+            最后有数据的行号；无数据返回 0
+        """
+        used_range = sheet.UsedRange
+        if used_range is None:
+            return 0
+
+        max_row = 0
+        start_col = used_range.Column
+        num_cols = min(used_range.Columns.Count, 100)
+
+        for i in range(num_cols):
+            col = start_col + i
+            try:
+                last_cell = sheet.Cells(sheet.Rows.Count, col).End(self.XL_UP)
+                if last_cell.Value is not None and last_cell.Row > max_row:
+                    max_row = last_cell.Row
+            except Exception:
+                continue
+
+        return max_row
+
+    def _get_data_last_col(self, sheet):
+        """
+        查找工作表中最后有数据的列号
+
+        使用 Cells(row, Columns.Count).End(xlToLeft) 方法。
+
+        Returns:
+            最后有数据的列号；无数据返回 0
+        """
+        used_range = sheet.UsedRange
+        if used_range is None:
+            return 0
+
+        max_col = 0
+        start_row = used_range.Row
+        # 不需要检查所有行，抽样检查前 200 行足够
+        num_rows = min(used_range.Rows.Count, 200)
+
+        for i in range(num_rows):
+            row = start_row + i
+            try:
+                last_cell = sheet.Cells(row, sheet.Columns.Count).End(self.XL_TO_LEFT)
+                if last_cell.Value is not None and last_cell.Column > max_col:
+                    max_col = last_cell.Column
+            except Exception:
+                continue
+
+        return max_col
+
+    def _optimize_print_area(self, workbook):
+        """
+        优化每个工作表的打印区域和页面布局
+
+        核心逻辑：
+        1. 用 End(xlUp)/End(xlToLeft) 精确定位最后有数据的行/列
+        2. 设置 PrintArea 只包含有数据的区域（排除空行空列）
+        3. 优化页面边距、方向、缩放
+        """
+        for sheet in workbook.Worksheets:
+            try:
+                used_range = sheet.UsedRange
+                if used_range is None or used_range.Count == 0:
+                    if workbook.Worksheets.Count > 1:
+                        sheet.Visible = False
+                    continue
+
+                # ===== 精确定位数据范围 =====
+                last_row = self._get_data_last_row(sheet)
+                last_col = self._get_data_last_col(sheet)
+
+                if last_row == 0 or last_col == 0:
+                    # 工作表没有任何数据值，隐藏
+                    if workbook.Worksheets.Count > 1:
+                        sheet.Visible = False
+                    continue
+
+                # ===== 设置精确的打印区域 =====
+                # 从第1行第1列开始，到最后有数据的行/列结束
+                print_range = sheet.Range(
+                    sheet.Cells(1, 1),
+                    sheet.Cells(last_row, last_col)
+                )
+                sheet.PageSetup.PrintArea = print_range.Address
+
+                logger.debug(
+                    f"工作表 '{sheet.Name}': "
+                    f"UsedRange={used_range.Rows.Count}行x{used_range.Columns.Count}列, "
+                    f"实际数据={last_row}行x{last_col}列"
+                )
+
+                # ===== 优化页面布局 =====
+                page_setup = sheet.PageSetup
+
+                if last_col > 8:
+                    page_setup.Orientation = 2  # xlLandscape
+                else:
+                    page_setup.Orientation = 1  # xlPortrait
+
+                page_setup.Zoom = False
+                page_setup.FitToPagesWide = 1
+                page_setup.FitToPagesTall = False
+
+                page_setup.LeftMargin = 7.2     # ~0.1 英寸
+                page_setup.RightMargin = 7.2
+                page_setup.TopMargin = 14.4     # ~0.2 英寸
+                page_setup.BottomMargin = 14.4
+                page_setup.HeaderMargin = 0
+                page_setup.FooterMargin = 0
+
+                page_setup.CenterHorizontally = True
+
+            except Exception as e:
+                logger.debug(f"设置工作表 '{sheet.Name}' 打印区域时出错: {e}")
+                continue
+
+    # ==================== PDF 空白页移除 ====================
+
     def _remove_blank_pages(self, pdf_path):
         """
-        移除 PDF 中的空白页
+        移除 PDF 中的空白页（双重检测）
 
-        检测每页的文本内容，如果文本量非常少（< 10个字符）
-        则判定为空白页并删除。
-
-        Args:
-            pdf_path: PDF 文件路径
+        检测逻辑：
+        - 提取文本，检查是否有可见字符（字母/数字/中文）
+        - 检查页面是否包含图片
+        - 没有文字 AND 没有图片 → 删除
 
         Returns:
             被删除的空白页数量
@@ -250,27 +382,36 @@ class ExcelConverter:
             total_pages = len(reader.pages)
 
             if total_pages <= 1:
-                # 只有1页，不删除（避免生成空文件）
                 return 0
 
             writer = PdfWriter()
             removed = 0
 
             for i, page in enumerate(reader.pages):
+                # 检测1: 是否有可见文字
                 text = page.extract_text() or ""
-                # 检查是否包含任何可见字符（字母、数字、中文等）
-                # 只有完全没有任何可见字符的页面才删除
-                has_visible_content = bool(re.search(r'[\w\u4e00-\u9fff]', text))
+                has_text = bool(re.search(r'[\w\u4e00-\u9fff]', text))
 
-                if not has_visible_content:
-                    # 空白页，跳过
+                # 检测2: 是否有图片
+                has_images = False
+                try:
+                    if '/Resources' in page:
+                        resources = page['/Resources']
+                        if '/XObject' in resources:
+                            xobjects = resources['/XObject']
+                            if xobjects and len(xobjects) > 0:
+                                has_images = True
+                except Exception:
+                    pass
+
+                # 有文字 OR 有图片 → 保留
+                if has_text or has_images:
+                    writer.add_page(page)
+                else:
                     removed += 1
                     logger.debug(f"  删除空白页: 第 {i+1} 页")
-                else:
-                    writer.add_page(page)
 
             if removed > 0 and len(writer.pages) > 0:
-                # 重新写入 PDF（覆盖原文件）
                 with open(pdf_path, "wb") as f:
                     writer.write(f)
 
@@ -280,54 +421,7 @@ class ExcelConverter:
             logger.debug(f"移除空白页时出错: {e}")
             return 0
 
-    def _optimize_print_area(self, workbook):
-        """
-        优化页面布局设置
-
-        策略：不主动设置 PrintArea（避免数据丢失），
-        只调整页边距、方向和缩放比例，让 Excel 自己决定打印内容。
-        """
-        for sheet in workbook.Worksheets:
-            try:
-                used_range = sheet.UsedRange
-                if used_range is None or used_range.Count == 0:
-                    # 空工作表，隐藏以避免空白页
-                    if workbook.Worksheets.Count > 1:
-                        sheet.Visible = False
-                    continue
-
-                # 清除任何已有的打印区域限制，让 Excel 导出全部内容
-                sheet.PageSetup.PrintArea = ""
-
-                # ===== 页面布局优化 =====
-                page_setup = sheet.PageSetup
-
-                # 自动判断横向/纵向（列多用横向）
-                cols = used_range.Columns.Count
-                if cols > 8:
-                    page_setup.Orientation = 2  # xlLandscape (横向)
-                else:
-                    page_setup.Orientation = 1  # xlPortrait (纵向)
-
-                # 自动缩放适配页面宽度
-                page_setup.Zoom = False
-                page_setup.FitToPagesWide = 1    # 宽度缩放到1页
-                page_setup.FitToPagesTall = False  # 高度不限制
-
-                # 最小化页边距 (单位: 磅, 1英寸=72磅)
-                page_setup.LeftMargin = 7.2     # 约 0.1 英寸
-                page_setup.RightMargin = 7.2
-                page_setup.TopMargin = 14.4     # 约 0.2 英寸
-                page_setup.BottomMargin = 14.4
-                page_setup.HeaderMargin = 0
-                page_setup.FooterMargin = 0
-
-                # 水平居中打印
-                page_setup.CenterHorizontally = True
-
-            except Exception as e:
-                logger.debug(f"设置工作表 '{sheet.Name}' 页面布局时出错: {e}")
-                continue
+    # ==================== 上下文管理器 ====================
 
     def __enter__(self):
         self.initialize()
