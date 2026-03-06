@@ -257,10 +257,10 @@ class ExcelConverter:
 
             for i, page in enumerate(reader.pages):
                 text = page.extract_text() or ""
-                # 去掉空白字符后判断
+                # 只删除完全没有任何内容的页面
                 clean_text = text.strip()
 
-                if len(clean_text) < 5:
+                if len(clean_text) == 0:
                     # 空白页，跳过
                     removed += 1
                     logger.debug(f"  删除空白页: 第 {i+1} 页")
