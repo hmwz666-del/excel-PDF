@@ -1,50 +1,61 @@
 @echo off
 chcp 65001 >nul 2>&1
-title Excel 转 PDF 工具 - 一键打包 EXE
+title Excel to PDF - Build EXE
 
 echo.
 echo ========================================
-echo    一键打包为独立 EXE 文件
+echo    Build standalone EXE file
 echo ========================================
 echo.
 
-REM 检查 Python
+REM === Find Python ===
+set PYTHON_CMD=python
 python --version >nul 2>&1
 if %errorlevel% neq 0 (
-    echo ❌ 未检测到 Python，请先安装 Python
-    pause
-    exit /b 1
+    set PYTHON_CMD=py
+    py --version >nul 2>&1
+    if %errorlevel% neq 0 (
+        echo [FAIL] Python not found!
+        echo Please run "Yi Jian Yun Xing.bat" first to install Python.
+        echo.
+        pause
+        exit /b 1
+    )
 )
 
-REM 安装依赖
-echo 📥 正在安装打包工具...
-pip install pywin32 pyinstaller -q
-echo ✅ 依赖安装完成
+echo [OK] Python found:
+%PYTHON_CMD% --version
 echo.
 
-REM 开始打包
-echo 📦 正在打包，这可能需要 1-3 分钟...
+REM === Install build dependencies ===
+echo Installing build tools...
+%PYTHON_CMD% -m pip install pywin32 pyinstaller -q
+echo [OK] Build tools ready
 echo.
 
-pyinstaller -F -w --name "Excel转PDF工具" --clean "%~dp0main.py"
+REM === Build EXE ===
+echo Building EXE file... (1-3 minutes)
+echo.
+
+%PYTHON_CMD% -m PyInstaller -F -w --name "ExcelToPDF" --clean "%~dp0main.py"
 
 if %errorlevel% equ 0 (
     echo.
     echo ========================================
-    echo ✅ 打包成功！
+    echo [OK] Build successful!
     echo.
-    echo 📂 EXE 文件位置:
-    echo    %~dp0dist\Excel转PDF工具.exe
+    echo EXE location:
+    echo   %~dp0dist\ExcelToPDF.exe
     echo.
-    echo 把这个 EXE 文件发给业务同学即可！
+    echo Send this EXE file to your colleagues!
     echo ========================================
     echo.
 
-    REM 自动打开 dist 文件夹
+    REM Open dist folder
     explorer "%~dp0dist"
 ) else (
     echo.
-    echo ❌ 打包失败，请查看上方错误信息
+    echo [FAIL] Build failed. See error above.
 )
 
 echo.
