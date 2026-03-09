@@ -294,30 +294,36 @@ class ExcelConverter:
         只删除数据结束后的多余分页符（这些才是产生空白页的原因）。
         """
         try:
-            # 找最后一行有可见内容的行号
             used = sheet.UsedRange
             if used is None:
                 return
 
-            last_visible_row = 0
-            total_rows = used.Rows.Count
             start_row = used.Row
-            total_cols = min(used.Columns.Count, 30)
-            start_col = used.Column
+            total_rows = used.Rows.Count
+
+            # 一次性读取所有值（单次 COM 调用）
+            all_values = used.Value
+            if all_values is None:
+                return
+
+            # 单行时 COM 返回一维 tuple，统一转为二维
+            if total_rows == 1:
+                all_values = (all_values,)
 
             # 从最后一行往上找第一行有可见内容的行
-            for r in range(start_row + total_rows - 1, start_row - 1, -1):
-                has_visible = False
-                for c in range(start_col, start_col + total_cols):
-                    try:
-                        val = sheet.Cells(r, c).Value
-                        if val is not None and str(val).strip() != '':
-                            has_visible = True
-                            break
-                    except Exception:
-                        continue
-                if has_visible:
-                    last_visible_row = r
+            last_visible_row = 0
+            for row_idx in range(len(all_values) - 1, -1, -1):
+                row_data = all_values[row_idx]
+                if row_data is None:
+                    continue
+                # 单列时 row_data 不是 tuple
+                if not isinstance(row_data, tuple):
+                    row_data = (row_data,)
+                for val in row_data:
+                    if val is not None and str(val).strip() != '':
+                        last_visible_row = start_row + row_idx
+                        break
+                if last_visible_row > 0:
                     break
 
             if last_visible_row == 0:
@@ -355,41 +361,51 @@ class ExcelConverter:
 
                 total_rows = used_range.Rows.Count
                 start_row = used_range.Row
-                total_cols = min(used_range.Columns.Count, 30)
-                start_col = used_range.Column
 
-                # 扫描所有行，标记哪些是"视觉空行"
-                empty_runs = []   # [(start, end), ...]
+                # 一次性读取所有值（单次 COM 调用，替代数千次逐格调用）
+                all_values = used_range.Value
+                if all_values is None:
+                    continue
+
+                # 单行时 COM 返回一维 tuple，统一转为二维
+                if total_rows == 1:
+                    all_values = (all_values,)
+
+                # 在 Python 内存中判断每行是否"视觉空行"
+                empty_runs = []
                 current_run_start = None
 
-                for r in range(start_row, start_row + total_rows):
+                for row_idx, row_data in enumerate(all_values):
                     is_visually_empty = True
-                    for c in range(start_col, start_col + total_cols):
-                        try:
-                            val = sheet.Cells(r, c).Value
+
+                    if row_data is not None:
+                        # 单列时 row_data 不是 tuple
+                        cells = row_data if isinstance(row_data, tuple) else (row_data,)
+                        for val in cells:
                             if val is not None and str(val).strip() != '':
                                 is_visually_empty = False
                                 break
-                        except Exception:
-                            continue
+
+                    actual_row = start_row + row_idx
 
                     if is_visually_empty:
                         if current_run_start is None:
-                            current_run_start = r
+                            current_run_start = actual_row
                     else:
                         if current_run_start is not None:
-                            run_length = r - current_run_start
+                            run_length = actual_row - current_run_start
                             if run_length >= 3:
-                                empty_runs.append((current_run_start, r - 1))
+                                empty_runs.append((current_run_start, actual_row - 1))
                             current_run_start = None
 
                 # 处理末尾的连续空行
                 if current_run_start is not None:
-                    run_length = (start_row + total_rows) - current_run_start
+                    last_row = start_row + total_rows - 1
+                    run_length = last_row - current_run_start + 1
                     if run_length >= 3:
-                        empty_runs.append((current_run_start, start_row + total_rows - 1))
+                        empty_runs.append((current_run_start, last_row))
 
-                # 隐藏连续空行
+                # 隐藏连续空行（仅需少量 COM 调用）
                 for run_start, run_end in empty_runs:
                     try:
                         hide_range = sheet.Range(
