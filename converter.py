@@ -64,6 +64,7 @@ class ExcelConverter:
     def __init__(self):
         self.excel_app = None
         self._initialized = False
+        self._original_printer = None
 
     def initialize(self):
         """初始化 COM 环境和 Excel 实例"""
@@ -81,6 +82,10 @@ class ExcelConverter:
             self.excel_app.Visible = EXCEL_VISIBLE
             self.excel_app.DisplayAlerts = EXCEL_ALERTS
             self.excel_app.ScreenUpdating = False
+
+            # 统一打印机：避免不同电脑默认打印机不同导致分页差异
+            self._set_unified_printer()
+
             self._initialized = True
             logger.info("Excel COM 实例初始化成功")
         except Exception as e:
@@ -91,6 +96,8 @@ class ExcelConverter:
     def cleanup(self):
         """清理 Excel COM 实例和 COM 环境"""
         if self.excel_app is not None:
+            # 恢复原打印机
+            self._restore_printer()
             try:
                 self.excel_app.Quit()
             except Exception:
@@ -104,6 +111,38 @@ class ExcelConverter:
 
         self._initialized = False
         logger.info("Excel COM 实例已清理")
+
+    def _set_unified_printer(self):
+        """
+        统一使用 'Microsoft Print to PDF' 打印机
+
+        不同电脑的默认打印机不同，Excel COM 导出 PDF 时
+        依赖打印机驱动计算页面布局（纸张大小、可打印区域等），
+        同一个 Excel 在不同打印机下可能分页不同。
+
+        统一使用系统自带的 PDF 打印机，确保一致的输出。
+        """
+        try:
+            self._original_printer = self.excel_app.ActivePrinter
+            logger.debug(f"原始打印机: {self._original_printer}")
+
+            # Windows 自带的 PDF 打印机（Win10/11 都有）
+            pdf_printer = "Microsoft Print to PDF"
+            self.excel_app.ActivePrinter = pdf_printer
+            logger.info(f"已切换打印机: {pdf_printer}")
+        except Exception as e:
+            # 如果切换失败（如打印机不存在），不影响正常转换
+            logger.debug(f"切换打印机失败（使用默认打印机）: {e}")
+            self._original_printer = None
+
+    def _restore_printer(self):
+        """恢复原始打印机设置"""
+        if self._original_printer and self.excel_app:
+            try:
+                self.excel_app.ActivePrinter = self._original_printer
+                logger.debug(f"已恢复打印机: {self._original_printer}")
+            except Exception:
+                pass
 
     def convert_file(self, excel_path, output_dir, input_dir=None):
         """
