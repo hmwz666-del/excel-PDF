@@ -23,10 +23,26 @@ def main():
     multiprocessing.freeze_support()
 
     import tkinter as tk
+    from tkinter import messagebox
     from gui import ExcelToPdfApp
 
     root = tk.Tk()
     app = ExcelToPdfApp(root)
+
+    # 启动时检查 pypdf 是否可用（用于空白页删除）
+    try:
+        import pypdf
+        pypdf_ok = True
+    except ImportError:
+        pypdf_ok = False
+
+    if not pypdf_ok:
+        root.after(500, lambda: messagebox.showwarning(
+            "功能受限",
+            "pypdf 模块未找到，空白页自动删除功能不可用。\n\n"
+            "请使用最新版本的「一键打包EXE.bat」重新打包。"
+        ))
+
     root.mainloop()
 
 

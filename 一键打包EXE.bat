@@ -37,7 +37,7 @@ REM === Build EXE ===
 echo Building EXE file... (1-3 minutes)
 echo.
 
-%PYTHON_CMD% -m PyInstaller -F -w --name "ExcelToPDF" --clean --hidden-import pypdf "%~dp0main.py"
+%PYTHON_CMD% -m PyInstaller -F -w --name "ExcelToPDF" --clean --hidden-import pypdf --hidden-import pypdf._readers --hidden-import pypdf._writers --hidden-import pypdf.filters --collect-submodules pypdf "%~dp0main.py"
 
 if %errorlevel% equ 0 (
     echo.
