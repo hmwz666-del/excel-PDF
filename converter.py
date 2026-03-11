@@ -515,10 +515,6 @@ class ExcelConverter:
                 SearchDirection=xlPrevious,
             )
 
-            if last_row_cell is None:
-                logger.debug(f"工作表 '{sheet.Name}': 无数据，跳过 PrintArea 设置")
-                return
-
             # 用 Find 快速定位最后有数据的列
             last_col_cell = sheet.Cells.Find(
                 What="*",
@@ -529,17 +525,40 @@ class ExcelConverter:
                 SearchDirection=xlPrevious,
             )
 
-            if last_col_cell is None:
+            last_data_row = last_row_cell.Row if last_row_cell else 1
+            last_data_col = last_col_cell.Column if last_col_cell else 1
+
+            # 遍历所有浮动图片/形状（如盖章），防止它们被 PrintArea 裁剪
+            # Forms, Pictures, OLEObjects 等都包含在 Shapes 集合中
+            max_shape_row = 1
+            max_shape_col = 1
+            
+            try:
+                for shape in sheet.Shapes:
+                    try:
+                        # 获取形状的右下角所在单元格
+                        br_cell = shape.BottomRightCell
+                        if br_cell:
+                            max_shape_row = max(max_shape_row, br_cell.Row)
+                            max_shape_col = max(max_shape_col, br_cell.Column)
+                    except Exception:
+                        continue
+            except Exception as e:
+                logger.debug(f"检查 Shapes 时出错 '{sheet.Name}': {e}")
+
+            # 最终边界取 数据边界 和 形状边界 的最大值
+            final_row = max(last_data_row, max_shape_row)
+            final_col = max(last_data_col, max_shape_col)
+
+            if final_row == 1 and final_col == 1 and last_row_cell is None:
+                logger.debug(f"工作表 '{sheet.Name}': 既无数据也无图片，跳过 PrintArea 设置")
                 return
 
-            last_data_row = last_row_cell.Row
-            last_data_col = last_col_cell.Column
-
             # 转换列号为字母
-            col_letter = self._col_num_to_letter(last_data_col)
+            col_letter = self._col_num_to_letter(final_col)
 
             # 设置 PrintArea
-            print_area = f"$A$1:${col_letter}${last_data_row}"
+            print_area = f"$A$1:${col_letter}${final_row}"
             sheet.PageSetup.PrintArea = print_area
 
             logger.info(
