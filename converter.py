@@ -9,6 +9,9 @@ import os
 import re
 import logging
 import traceback
+import tempfile
+import shutil
+import uuid
 
 try:
     import win32com.client
@@ -204,18 +207,34 @@ class ExcelConverter:
                 # 预处理工作簿（根据文件类型自动选择策略）
                 self._prepare_workbook(workbook)
 
-                # 导出为 PDF
+                # 生成安全的系统临时文件路径（绕过透明加密）
+                temp_pdf_path = os.path.join(
+                    tempfile.gettempdir(),
+                    f"excel_to_pdf_temp_{uuid.uuid4().hex}.pdf"
+                )
+
+                # 第一步：先导出到系统临时目录（不被加密）
                 workbook.ExportAsFixedFormat(
                     Type=XL_TYPE_PDF,
-                    Filename=os.path.abspath(pdf_path),
+                    Filename=os.path.abspath(temp_pdf_path),
                     Quality=0,
                     IncludeDocProperties=True,
                     IgnorePrintAreas=False,
                     OpenAfterPublish=False,
                 )
 
-                # 后处理：删除末尾空白页
-                removed = self._remove_last_blank_page(pdf_path)
+                # 第二步：在临时目录（未加密状态）下删除空白页
+                removed = self._remove_last_blank_page(temp_pdf_path)
+
+                # 第三步：将干净的 PDF 复制到最终目录（复制过程中会被企业软件自动加密）
+                shutil.copy2(temp_pdf_path, os.path.abspath(pdf_path))
+
+                # 第四步：安全销毁（阅后即焚）临时未加密文件
+                try:
+                    os.remove(temp_pdf_path)
+                    logger.debug(f"已清理临时文件: {temp_pdf_path}")
+                except Exception as e:
+                    logger.warning(f"无法清理临时文件 {temp_pdf_path}: {e}")
 
                 if renamed:
                     msg = f"转换成功 (同名文件 {original_pdf_name} 已重命名为 {os.path.basename(pdf_path)})"
@@ -225,8 +244,8 @@ class ExcelConverter:
                     logger.info(f"✅ 转换成功: {os.path.basename(excel_path)}")
 
                 if removed:
-                    msg += " (已删除末尾空白页)"
-                    logger.info(f"   🗑️ 已删除末尾空白页")
+                    msg += " (已删除尾部空白页)"
+                    logger.info(f"   🗑️ 已删除尾部空白页")
 
                 return ConversionResult(
                     excel_path, ConversionResult.SUCCESS,
