@@ -48,6 +48,32 @@ if not os.path.exists(pdf_path):
 
 # 分析每一页
 reader = PdfReader(pdf_path)
+
+# 检测加密
+if reader.is_encrypted:
+    print("\n🔒 检测到 PDF 已加密（可能是企业电脑自动加密）")
+    try:
+        result = reader.decrypt("")
+        if result == 0:
+            print("❌ 无法解密！这就是空白页无法处理的原因！")
+            print("   企业电脑的自动加密功能导致 PDF 被加密，")
+            print("   程序无法读取 PDF 内容来判断空白页。")
+            print("\n   建议：")
+            print("   1. 在未加密的电脑上运行转换工具")
+            print("   2. 或联系 IT 部门将输出目录加入加密白名单")
+            input("\n按回车退出...")
+            sys.exit(1)
+        else:
+            print("✅ 已用空密码成功解密，继续分析...")
+    except Exception as e:
+        print(f"❌ 解密失败: {e}")
+        print("   这就是空白页无法处理的原因！")
+        print("   企业电脑的自动加密功能导致 PDF 被加密。")
+        input("\n按回车退出...")
+        sys.exit(1)
+else:
+    print("\n✅ PDF 未加密")
+
 total = len(reader.pages)
 print(f"\n文件: {os.path.basename(pdf_path)}")
 print(f"总页数: {total}")

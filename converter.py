@@ -470,6 +470,8 @@ class ExcelConverter:
         从最后一页往前检查，遇到有内容的页就停止。
         判定空白：没有可见文字 AND 没有实际图片（忽略表单/字体等 XObject）。
 
+        支持处理被系统自动加密的 PDF（如企业电脑的透明加密软件）。
+
         Returns:
             True 如果删除了空白页，False 如果没有
         """
@@ -479,6 +481,28 @@ class ExcelConverter:
 
         try:
             reader = PdfReader(pdf_path)
+
+            # 处理加密的 PDF（企业电脑可能自动加密输出文件）
+            if reader.is_encrypted:
+                logger.info(f"  🔒 检测到 PDF 已加密，尝试解密...")
+                try:
+                    # 尝试用空密码解密（大部分自动加密软件使用空密码或 owner 密码）
+                    decrypt_result = reader.decrypt("")
+                    if decrypt_result == 0:
+                        # 空密码解密失败，再尝试不提供密码直接读取
+                        logger.warning(
+                            f"  ⚠️ PDF 已加密且无法用空密码解密，跳过空白页处理。"
+                            f"这可能是企业加密软件导致的，不影响 PDF 内容正确性。"
+                        )
+                        return False
+                    logger.info(f"  🔓 PDF 解密成功，继续处理空白页")
+                except Exception as e:
+                    logger.warning(
+                        f"  ⚠️ PDF 解密失败: {e}，跳过空白页处理。"
+                        f"这可能是企业加密软件导致的，不影响 PDF 内容正确性。"
+                    )
+                    return False
+
             total_pages = len(reader.pages)
 
             if total_pages <= 1:
@@ -491,7 +515,13 @@ class ExcelConverter:
                 page = reader.pages[last_content_page]
 
                 # 检查是否有可见文字
-                text = page.extract_text() or ""
+                try:
+                    text = page.extract_text() or ""
+                except Exception:
+                    # 加密或损坏的页面可能无法提取文字，视为有内容（保险起见不删）
+                    logger.debug(f"  第 {last_content_page + 1} 页无法提取文字，跳过")
+                    break
+
                 has_text = bool(re.search(r'[\w\u4e00-\u9fff]', text))
 
                 if has_text:
@@ -545,7 +575,15 @@ class ExcelConverter:
             return True
 
         except Exception as e:
-            logger.debug(f"检查末尾空白页时出错: {e}")
+            # 捕获所有异常，包括加密导致的读取失败
+            error_msg = str(e).lower()
+            if 'encrypt' in error_msg or 'password' in error_msg or 'decrypt' in error_msg:
+                logger.warning(
+                    f"  ⚠️ PDF 文件已加密，无法处理空白页: {e}。"
+                    f"这可能是企业电脑自动加密导致的。"
+                )
+            else:
+                logger.debug(f"检查末尾空白页时出错: {e}")
             return False
 
     def __enter__(self):
