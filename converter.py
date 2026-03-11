@@ -282,6 +282,9 @@ class ExcelConverter:
           - 宽度适配 FitToPagesWide
           - 隐藏连续空行
           - 调整分页符避免行跨页
+
+        最后对所有工作表设置 PrintArea 到实际数据范围，
+        从源头杜绝空白页（兼容企业透明加密环境）。
         """
         for sheet in workbook.Worksheets:
             try:
@@ -316,6 +319,16 @@ class ExcelConverter:
 
         # 隐藏连续空行（适用于所有文件）
         self._hide_empty_rows(workbook)
+
+        # 设置 PrintArea 到实际数据范围（在所有预处理之后执行）
+        # 这是空白页消除的核心手段，完全在 Excel COM 层面操作，
+        # 不依赖 PDF 后处理，兼容企业透明加密环境
+        for sheet in workbook.Worksheets:
+            try:
+                self._set_print_area_to_data(sheet)
+            except Exception as e:
+                logger.debug(f"设置 PrintArea 时出错 '{sheet.Name}': {e}")
+                continue
 
     def _has_manual_page_breaks(self, sheet):
         """检查工作表是否有手动分页符"""
@@ -462,6 +475,90 @@ class ExcelConverter:
             except Exception as e:
                 logger.debug(f"检测工作表 '{sheet.Name}' 空行时出错: {e}")
                 continue
+
+    def _set_print_area_to_data(self, sheet):
+        """
+        将工作表的 PrintArea 精确设置到实际有数据的范围
+
+        使用 Excel 的 Cells.Find 方法快速定位最后有数据的行和列，
+        然后设置 PrintArea 限制打印范围，从源头杜绝空白页。
+
+        规则：
+        - 如果已有用户设置的 PrintArea → 不覆盖（保证数据完整性）
+        - 如果没有 PrintArea → 设置为 $A$1:${最后列}${最后行}
+        - 找不到数据时 → 不设置（避免误操作）
+        """
+        try:
+            # 检查是否已有 PrintArea（用户手动设置的，不覆盖）
+            current_print_area = sheet.PageSetup.PrintArea
+            if current_print_area and str(current_print_area).strip():
+                logger.debug(
+                    f"工作表 '{sheet.Name}': 已有 PrintArea="
+                    f"{current_print_area}，保持不变"
+                )
+                return
+
+            # Excel COM 常量
+            xlByRows = 1       # 按行搜索
+            xlByColumns = 2    # 按列搜索
+            xlPrevious = 2     # 从后往前搜索
+            xlValues = -4163   # 搜索值（非公式）
+            xlPart = 2         # 部分匹配
+
+            # 用 Find 快速定位最后有数据的行（从 A1 反向搜索，绕到最后一个单元格）
+            last_row_cell = sheet.Cells.Find(
+                What="*",
+                After=sheet.Cells(1, 1),
+                LookIn=xlValues,
+                LookAt=xlPart,
+                SearchOrder=xlByRows,
+                SearchDirection=xlPrevious,
+            )
+
+            if last_row_cell is None:
+                logger.debug(f"工作表 '{sheet.Name}': 无数据，跳过 PrintArea 设置")
+                return
+
+            # 用 Find 快速定位最后有数据的列
+            last_col_cell = sheet.Cells.Find(
+                What="*",
+                After=sheet.Cells(1, 1),
+                LookIn=xlValues,
+                LookAt=xlPart,
+                SearchOrder=xlByColumns,
+                SearchDirection=xlPrevious,
+            )
+
+            if last_col_cell is None:
+                return
+
+            last_data_row = last_row_cell.Row
+            last_data_col = last_col_cell.Column
+
+            # 转换列号为字母
+            col_letter = self._col_num_to_letter(last_data_col)
+
+            # 设置 PrintArea
+            print_area = f"$A$1:${col_letter}${last_data_row}"
+            sheet.PageSetup.PrintArea = print_area
+
+            logger.info(
+                f"  📐 工作表 '{sheet.Name}': "
+                f"PrintArea → {print_area}"
+            )
+
+        except Exception as e:
+            # 设置失败不影响正常转换
+            logger.debug(f"设置 PrintArea 失败 '{sheet.Name}': {e}")
+
+    @staticmethod
+    def _col_num_to_letter(col_num):
+        """列号转 Excel 列字母 (1→A, 26→Z, 27→AA, 702→ZZ, 703→AAA)"""
+        result = ""
+        while col_num > 0:
+            col_num, remainder = divmod(col_num - 1, 26)
+            result = chr(65 + remainder) + result
+        return result
 
     def _remove_last_blank_page(self, pdf_path):
         """
