@@ -207,12 +207,11 @@ class ExcelConverter:
                 # 预处理工作簿（根据文件类型自动选择策略）
                 self._prepare_workbook(workbook)
 
-                # 生成安全的系统临时文件路径（绕过透明加密）
-                # 【关键修复】后缀设为 .tmp 而不是 .pdf，因为绝大多数透明加密软件
-                # 都是根据文件后缀名（.pdf, .xls）来拦截加密的。
+                # 回退：不能使用 .tmp 因为 ExportAsFixedFormat 强制会自动加上 .pdf
+                # 这会导致生成的是 .tmp.pdf，从而触发加密并让 python 找不到 .tmp 文件报错。
                 temp_pdf_path = os.path.join(
                     tempfile.gettempdir(),
-                    f"excel_to_pdf_temp_{uuid.uuid4().hex}.tmp"
+                    f"excel_to_pdf_temp_{uuid.uuid4().hex}.pdf"
                 )
 
                 # 第一步：先导出到系统临时目录（不被加密）
