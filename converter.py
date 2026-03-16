@@ -586,6 +586,24 @@ class ExcelConverter:
                 f"PrintArea → {print_area}"
             )
 
+            # 智能收缩尾部溢出的空白页
+            # 如果加入 Shapes 后，导致 PrintArea 下沿被撑开，可能会产生多余的一页视觉空白页
+            if max_shape_row > last_data_row and sheet.HPageBreaks.Count > 0:
+                # 获取最后一个水平分页符所在行（即最后一页开始的行）
+                last_pb_row = sheet.HPageBreaks(sheet.HPageBreaks.Count).Location.Row
+                
+                # 如果最后一页的开始行，比我们实际有效数据行（文字/数字）还要靠下
+                # 说明这新增的最后一页里【完全没有任何实际数据】，只有被盖章透明边框撑出来的空白
+                if last_pb_row > last_data_row:
+                    target_pages = sheet.HPageBreaks.Count
+                    logger.info(
+                        f"  🔄 检测到盖章边缘溢出导致产生多余尾页 (分页于行 {last_pb_row} > 数据末行 {last_data_row})，"
+                        f"已自适应缩放至 {target_pages} 页以消除空白页。"
+                    )
+                    sheet.PageSetup.Zoom = False
+                    sheet.PageSetup.FitToPagesWide = 1
+                    sheet.PageSetup.FitToPagesTall = target_pages
+
         except Exception as e:
             # 设置失败不影响正常转换
             logger.debug(f"设置 PrintArea 失败 '{sheet.Name}': {e}")
