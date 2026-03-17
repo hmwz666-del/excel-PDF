@@ -548,6 +548,12 @@ class ExcelConverter:
             last_data_row = last_row_cell.Row if last_row_cell else 1
             last_data_col = last_col_cell.Column if last_col_cell else 1
 
+            # --- 核心第一步：探测纯数据本应该占用的完美页数 ---
+            data_col_letter = self._col_num_to_letter(last_data_col)
+            sheet.PageSetup.PrintArea = f"$A$1:${data_col_letter}${last_data_row}"
+            # 读取当前水平分页数。页数 = HPageBreaks 数量 + 1
+            data_tall_pages = sheet.HPageBreaks.Count + 1
+
             # 遍历所有浮动图片/形状（如盖章），防止它们被 PrintArea 裁剪
             # Forms, Pictures, OLEObjects 等都包含在 Shapes 集合中
             max_shape_row = 1
@@ -574,6 +580,7 @@ class ExcelConverter:
                 logger.debug(f"工作表 '{sheet.Name}': 既无数据也无图片，跳过 PrintArea 设置")
                 return
 
+            # --- 核心第二步：设置包含 Shapes 的最终 PrintArea ---
             # 转换列号为字母
             col_letter = self._col_num_to_letter(final_col)
 
@@ -586,23 +593,16 @@ class ExcelConverter:
                 f"PrintArea → {print_area}"
             )
 
-            # 智能收缩尾部溢出的空白页
-            # 如果加入 Shapes 后，导致 PrintArea 下沿被撑开，可能会产生多余的一页视觉空白页
-            if max_shape_row > last_data_row and sheet.HPageBreaks.Count > 0:
-                # 获取最后一个水平分页符所在行（即最后一页开始的行）
-                last_pb_row = sheet.HPageBreaks(sheet.HPageBreaks.Count).Location.Row
-                
-                # 如果最后一页的开始行，比我们实际有效数据行（文字/数字）还要靠下
-                # 说明这新增的最后一页里【完全没有任何实际数据】，只有被盖章透明边框撑出来的空白
-                if last_pb_row > last_data_row:
-                    target_pages = sheet.HPageBreaks.Count
-                    logger.info(
-                        f"  🔄 检测到盖章边缘溢出导致产生多余尾页 (分页于行 {last_pb_row} > 数据末行 {last_data_row})，"
-                        f"已自适应缩放至 {target_pages} 页以消除空白页。"
-                    )
-                    sheet.PageSetup.Zoom = False
-                    sheet.PageSetup.FitToPagesWide = 1
-                    sheet.PageSetup.FitToPagesTall = target_pages
+            # --- 核心第三步：消除盖章透明底边造成的虚无溢出空白页 ---
+            # 如果加入 Shapes 后，导致数据的右边或下边延展了（通常是盖章的透明 Padding 造成的）
+            if final_row > last_data_row or final_col > last_data_col:
+                logger.info(
+                    f"  🔄 发现形状(盖章)边界超出纯数据区 (行: {last_data_row}->{final_row}, 列: {last_data_col}->{final_col})。 "
+                    f"启用防溢出收缩，强制束缚在 {data_tall_pages} 页内以消灭空白页。"
+                )
+                sheet.PageSetup.Zoom = False
+                sheet.PageSetup.FitToPagesWide = 1
+                sheet.PageSetup.FitToPagesTall = data_tall_pages
 
         except Exception as e:
             # 设置失败不影响正常转换
