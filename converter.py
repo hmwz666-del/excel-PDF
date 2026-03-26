@@ -550,6 +550,11 @@ class ExcelConverter:
 
             last_data_row = last_row_cell.Row if last_row_cell else 1
             last_data_col = last_col_cell.Column if last_col_cell else 1
+            visual_text_col = self._get_visual_text_right_boundary(
+                sheet,
+                last_data_row,
+                last_data_col,
+            )
 
             # --- 核心第一步：探测纯数据本应该占用的完美页数 ---
             data_col_letter = self._col_num_to_letter(last_data_col)
@@ -577,7 +582,7 @@ class ExcelConverter:
 
             # 最终边界取 数据边界 和 形状边界 的最大值
             final_row = max(last_data_row, max_shape_row)
-            final_col = max(last_data_col, max_shape_col)
+            final_col = max(last_data_col, max_shape_col, visual_text_col)
 
             if final_row == 1 and final_col == 1 and last_row_cell is None:
                 logger.debug(f"工作表 '{sheet.Name}': 既无数据也无图片，跳过 PrintArea 设置")
@@ -596,9 +601,14 @@ class ExcelConverter:
                 f"PrintArea → {print_area}"
             )
 
+            if visual_text_col > last_data_col:
+                logger.info(
+                    f"  ↔️ 检测到右侧文本视觉溢出边界，列: {last_data_col}->{visual_text_col}"
+                )
+
             # --- 核心第三步：消除盖章透明底边造成的虚无溢出空白页 ---
             # 如果加入 Shapes 后，导致数据的右边或下边延展了（通常是盖章的透明 Padding 造成的）
-            if final_row > last_data_row or final_col > last_data_col:
+            if final_row > last_data_row or max_shape_col > last_data_col:
                 logger.info(
                     f"  🔄 发现形状(盖章)边界超出纯数据区 (行: {last_data_row}->{final_row}, 列: {last_data_col}->{final_col})。 "
                     f"启用防溢出收缩，强制束缚在 {data_tall_pages} 页内以消灭空白页。"
@@ -610,6 +620,148 @@ class ExcelConverter:
         except Exception as e:
             # 设置失败不影响正常转换
             logger.debug(f"设置 PrintArea 失败 '{sheet.Name}': {e}")
+
+    def _get_visual_text_right_boundary(self, sheet, last_data_row, last_data_col):
+        """
+        估算“视觉上真正占到的最右列”。
+
+        Excel 中单元格文本可以溢出到右侧连续空白列，合并单元格也可能让
+        “有值列”小于“实际显示宽度”。如果只按最后有值列设置 PrintArea，
+        右边最后几位字符会被裁掉。
+        """
+        try:
+            used_range = sheet.UsedRange
+            if used_range is None:
+                return last_data_col
+
+            all_values = used_range.Value
+            if all_values is None:
+                return last_data_col
+
+            total_rows = used_range.Rows.Count
+            total_cols = used_range.Columns.Count
+            start_col = used_range.Column
+
+            if total_rows == 1 and total_cols == 1:
+                all_values = ((all_values,),)
+            elif total_rows == 1:
+                all_values = (all_values,)
+
+            candidate_min_col = max(start_col, last_data_col - 4)
+            visual_col = last_data_col
+
+            for row_idx, row_data in enumerate(all_values):
+                if row_data is None:
+                    continue
+
+                cells = row_data if isinstance(row_data, tuple) else (row_data,)
+
+                for col_idx in range(len(cells) - 1, -1, -1):
+                    actual_col = start_col + col_idx
+                    if actual_col < candidate_min_col:
+                        break
+
+                    value = cells[col_idx]
+                    if value is None or str(value).strip() == '':
+                        continue
+
+                    cell = used_range.Cells(row_idx + 1, col_idx + 1)
+                    visual_col = max(
+                        visual_col,
+                        self._get_cell_visual_right_col(sheet, cell, value),
+                    )
+                    break
+
+            return visual_col
+        except Exception as e:
+            logger.debug(f"检测右侧文本视觉边界失败 '{sheet.Name}': {e}")
+            return last_data_col
+
+    def _get_cell_visual_right_col(self, sheet, cell, raw_value):
+        """估算某个单元格（含合并/溢出文本）视觉上占到的最右列。"""
+        try:
+            merge_area = cell.MergeArea if cell.MergeCells else None
+        except Exception:
+            merge_area = None
+
+        if merge_area is not None:
+            right_col = merge_area.Column + merge_area.Columns.Count - 1
+            available_width = merge_area.Width
+            if right_col > cell.Column:
+                return right_col
+        else:
+            right_col = cell.Column
+            available_width = cell.Width
+
+        try:
+            display_text = str(cell.Text).strip()
+        except Exception:
+            display_text = str(raw_value).strip()
+
+        if not display_text:
+            return right_col
+
+        try:
+            if cell.WrapText:
+                return right_col
+        except Exception:
+            pass
+
+        estimated_width = self._estimate_text_width_points(display_text, cell)
+        if estimated_width <= available_width:
+            return right_col
+
+        try:
+            max_scan_col = min(sheet.Columns.Count, right_col + 6)
+        except Exception:
+            max_scan_col = right_col + 6
+
+        current_right_col = right_col
+
+        while current_right_col < max_scan_col and available_width < estimated_width:
+            next_col = current_right_col + 1
+            next_cell = sheet.Cells(cell.Row, next_col)
+
+            try:
+                next_value = next_cell.Value
+            except Exception:
+                break
+
+            if next_value is not None and str(next_value).strip() != '':
+                break
+
+            try:
+                if next_cell.MergeCells:
+                    break
+            except Exception:
+                pass
+
+            try:
+                available_width += next_cell.Width
+            except Exception:
+                break
+
+            current_right_col = next_col
+
+        return current_right_col
+
+    def _estimate_text_width_points(self, text, cell):
+        """用保守估算把显示文本宽度换算成 Excel 点数。"""
+        try:
+            font_size = float(cell.Font.Size)
+        except Exception:
+            font_size = 11.0
+
+        units = 0.0
+        for ch in text:
+            if ord(ch) > 127:
+                units += 1.7
+            elif ch.isupper() or ch.isdigit():
+                units += 1.0
+            else:
+                units += 0.85
+
+        return units * font_size * 0.72 + 6
 
     @staticmethod
     def _col_num_to_letter(col_num):
