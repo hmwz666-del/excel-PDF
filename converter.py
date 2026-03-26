@@ -19,6 +19,12 @@ try:
     from pywintypes import com_error
     HAS_WIN32COM = True
 except ImportError:
+    win32com = None
+    pythoncom = None
+
+    class com_error(Exception):
+        """非 Windows 环境下的占位 COM 异常类型。"""
+
     HAS_WIN32COM = False
 
 try:
@@ -108,7 +114,8 @@ class ExcelConverter:
             self.excel_app = None
 
         try:
-            pythoncom.CoUninitialize()
+            if pythoncom is not None:
+                pythoncom.CoUninitialize()
         except Exception:
             pass
 
@@ -195,6 +202,7 @@ class ExcelConverter:
         last_error = None
 
         for attempt in range(RETRY_COUNT + 1):
+            temp_pdf_path = None
             try:
                 workbook = self.excel_app.Workbooks.Open(
                     os.path.abspath(excel_path),
@@ -229,13 +237,6 @@ class ExcelConverter:
 
                 # 第三步：将干净的 PDF 复制到最终目录（复制过程中会被企业软件自动加密）
                 shutil.copy2(temp_pdf_path, os.path.abspath(pdf_path))
-
-                # 第四步：安全销毁（阅后即焚）临时未加密文件
-                try:
-                    os.remove(temp_pdf_path)
-                    logger.debug(f"已清理临时文件: {temp_pdf_path}")
-                except Exception as e:
-                    logger.warning(f"无法清理临时文件 {temp_pdf_path}: {e}")
 
                 if renamed:
                     msg = f"转换成功 (同名文件 {original_pdf_name} 已重命名为 {os.path.basename(pdf_path)})"
@@ -281,6 +282,8 @@ class ExcelConverter:
                     except Exception:
                         pass
                     workbook = None
+
+                self._cleanup_temp_pdf(temp_pdf_path)
 
         logger.error(f"❌ 最终失败: {os.path.basename(excel_path)} - {last_error}")
         return ConversionResult(
@@ -622,7 +625,8 @@ class ExcelConverter:
         从 PDF 末尾循环删除所有连续的空白页
 
         从最后一页往前检查，遇到有内容的页就停止。
-        判定空白：没有可见文字 AND 没有实际图片（忽略表单/字体等 XObject）。
+        判定空白：没有文字、图片、Form XObject、注释，
+        且没有明显的绘制指令。
 
         支持处理被系统自动加密的 PDF（如企业电脑的透明加密软件）。
 
@@ -668,45 +672,10 @@ class ExcelConverter:
             while last_content_page >= 1:  # 至少保留第1页
                 page = reader.pages[last_content_page]
 
-                # 检查是否有可见文字
-                try:
-                    text = page.extract_text() or ""
-                except Exception:
-                    # 加密或损坏的页面可能无法提取文字，视为有内容（保险起见不删）
-                    logger.debug(f"  第 {last_content_page + 1} 页无法提取文字，跳过")
-                    break
+                if self._page_has_meaningful_content(page):
+                    break  # 有内容，停止
 
-                has_text = bool(re.search(r'[\w\u4e00-\u9fff]', text))
-
-                if has_text:
-                    break  # 有文字，停止
-
-                # 检查是否有实际图片（不是表单/字体等 XObject）
-                has_real_image = False
-                try:
-                    if '/Resources' in page:
-                        resources = page['/Resources']
-                        if '/XObject' in resources:
-                            xobjects = resources['/XObject']
-                            if xobjects:
-                                for key in xobjects:
-                                    try:
-                                        xobj = xobjects[key]
-                                        obj = xobj.get_object() if hasattr(xobj, 'get_object') else xobj
-                                        # 只有 Subtype 为 /Image 的才是真正的图片
-                                        subtype = obj.get('/Subtype', '')
-                                        if subtype == '/Image':
-                                            has_real_image = True
-                                            break
-                                    except Exception:
-                                        continue
-                except Exception:
-                    pass
-
-                if has_real_image:
-                    break  # 有图片，停止
-
-                # 这一页既没有文字也没有图片 → 空白页，继续往前检查
+                # 这一页没有检测到真实内容 → 视为空白页，继续往前检查
                 logger.debug(f"  检测到空白页: 第 {last_content_page + 1} 页")
                 last_content_page -= 1
 
@@ -739,6 +708,101 @@ class ExcelConverter:
             else:
                 logger.debug(f"检查末尾空白页时出错: {e}")
             return False
+
+    def _cleanup_temp_pdf(self, temp_pdf_path):
+        """尽力清理临时目录中的未加密 PDF。"""
+        if not temp_pdf_path:
+            return
+
+        if not os.path.exists(temp_pdf_path):
+            return
+
+        try:
+            os.remove(temp_pdf_path)
+            logger.debug(f"已清理临时文件: {temp_pdf_path}")
+        except Exception as e:
+            logger.warning(f"无法清理临时文件 {temp_pdf_path}: {e}")
+
+    def _page_has_meaningful_content(self, page):
+        """
+        判断页面是否包含真实内容。
+
+        这里采用偏保守的策略：只要检测到文字、位图、Form XObject、
+        注释，或明显的绘制指令，就视为有内容，避免误删矢量章/签字页。
+        """
+        try:
+            text = page.extract_text() or ""
+        except Exception:
+            # 无法可靠读取页面时，宁可保留，也不冒险删除。
+            return True
+
+        if re.search(r'[\w\u4e00-\u9fff]', text):
+            return True
+
+        try:
+            if '/Annots' in page and page['/Annots']:
+                return True
+        except Exception:
+            return True
+
+        try:
+            if '/Resources' in page:
+                resources = page['/Resources']
+                if '/XObject' in resources:
+                    xobjects = resources['/XObject']
+                    if xobjects:
+                        for key in xobjects:
+                            try:
+                                xobj = xobjects[key]
+                                obj = xobj.get_object() if hasattr(xobj, 'get_object') else xobj
+                                subtype = str(obj.get('/Subtype', ''))
+                                if subtype in ('/Image', '/Form', '/PS'):
+                                    return True
+                            except Exception:
+                                return True
+        except Exception:
+            return True
+
+        try:
+            contents = page.get_contents()
+            if contents is None:
+                return False
+
+            if isinstance(contents, list):
+                content_bytes = b''.join(
+                    stream.get_data()
+                    for stream in contents
+                    if stream is not None
+                )
+            else:
+                content_bytes = contents.get_data()
+
+            if not content_bytes:
+                return False
+
+            # 识别常见的“真的在画东西”的 PDF 操作符。
+            visible_tokens = (
+                b'BT',     # 文本对象
+                b' Do',    # 绘制 XObject
+                b'\nDo',
+                b' Tj',
+                b' TJ',
+                b" '",
+                b' "',
+                b' S',     # 描边
+                b' s',
+                b' f',     # 填充
+                b' f*',
+                b' F',
+                b' B',     # 描边+填充
+                b' B*',
+                b' b',
+                b' b*',
+                b' sh',    # shading
+            )
+            return any(token in content_bytes for token in visible_tokens)
+        except Exception:
+            return True
 
     def __enter__(self):
         self.initialize()

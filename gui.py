@@ -34,6 +34,7 @@ class ExcelToPdfApp:
         self.manager = None
         self._conversion_thread = None
         self._log_file = None
+        self._close_after_stop = False
 
         # 界面变量
         self.input_dir = tk.StringVar()
@@ -357,6 +358,7 @@ class ExcelToPdfApp:
             return
 
         # 更新 UI 状态
+        self._close_after_stop = False
         self.start_btn.configure(state=tk.DISABLED)
         self.stop_btn.configure(state=tk.NORMAL)
         self.progress_var.set(0)
@@ -390,7 +392,8 @@ class ExcelToPdfApp:
             )
 
             # 转换完成，更新 UI
-            self.root.after(0, self._on_conversion_complete, success, failed, skipped)
+            stopped = self.manager.was_stopped if self.manager else False
+            self.root.after(0, self._on_conversion_complete, success, failed, skipped, stopped)
 
         except Exception as e:
             self.root.after(
@@ -410,30 +413,49 @@ class ExcelToPdfApp:
         self.progress_label.configure(text=f"{percent:.0f}%")
         self.status_text.set(f"转换中... {current}/{total}")
 
-    def _on_conversion_complete(self, success, failed, skipped):
+    def _on_conversion_complete(self, success, failed, skipped, stopped=False):
         """转换完成后的回调"""
         self._reset_ui()
 
         total = success + failed + skipped
         self.progress_var.set(100)
         self.progress_label.configure(text="100%")
-        self.status_text.set("转换完成!")
+        self.status_text.set("已停止" if stopped else "转换完成!")
+
+        if self._close_after_stop:
+            self.root.destroy()
+            return
 
         # 弹出结果统计
-        messagebox.showinfo(
-            "转换完成",
-            f"📊 转换结果统计\n\n"
-            f"总计: {total} 个文件\n"
-            f"✅ 成功: {success}\n"
-            f"❌ 失败: {failed}\n"
-            f"⏭️ 跳过: {skipped}\n\n"
-            f"📂 输出目录: {self.output_dir.get()}"
-        )
+        if stopped:
+            title = "转换已停止"
+            body = (
+                f"📊 已停止本次转换\n\n"
+                f"总计: {total} 个文件\n"
+                f"✅ 成功: {success}\n"
+                f"❌ 失败: {failed}\n"
+                f"⏭️ 未处理/跳过: {skipped}\n\n"
+                f"📂 输出目录: {self.output_dir.get()}"
+            )
+        else:
+            title = "转换完成"
+            body = (
+                f"📊 转换结果统计\n\n"
+                f"总计: {total} 个文件\n"
+                f"✅ 成功: {success}\n"
+                f"❌ 失败: {failed}\n"
+                f"⏭️ 跳过: {skipped}\n\n"
+                f"📂 输出目录: {self.output_dir.get()}"
+            )
+
+        messagebox.showinfo(title, body)
 
     def _stop_conversion(self):
         """停止转换"""
         if self.manager and self.manager.is_running:
             self.manager.stop()
+            self.stop_btn.configure(state=tk.DISABLED)
+            self.status_text.set("正在停止，等待当前文件完成...")
             self._append_log("🛑 正在停止转换，请稍候...", "warning")
 
     def _open_output_dir(self):
@@ -475,7 +497,20 @@ class ExcelToPdfApp:
         """窗口关闭事件"""
         if self.manager and self.manager.is_running:
             if messagebox.askyesno("确认", "转换正在进行中，确定要退出吗？"):
+                self._close_after_stop = True
                 self.manager.stop()
-                self.root.after(2000, self.root.destroy)
+                self.status_text.set("正在停止，准备退出...")
+                self.root.after(300, self._wait_for_shutdown)
             return
+        self.root.destroy()
+
+    def _wait_for_shutdown(self):
+        """等待后台转换线程和工作进程自然退出后再关闭窗口。"""
+        manager_running = self.manager and self.manager.is_running
+        thread_running = self._conversion_thread and self._conversion_thread.is_alive()
+
+        if manager_running or thread_running:
+            self.root.after(300, self._wait_for_shutdown)
+            return
+
         self.root.destroy()

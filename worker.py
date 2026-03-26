@@ -10,15 +10,17 @@ import os
 import logging
 import multiprocessing
 from multiprocessing import Process, Queue
+from queue import Empty
 import time
 
 from config import SUPPORTED_EXTENSIONS
 from converter import ExcelConverter, ConversionResult
 
 logger = logging.getLogger(__name__)
+RESULT_QUEUE_TIMEOUT = 1.0
 
 
-def worker_process(task_queue, result_queue, worker_id):
+def worker_process(task_queue, result_queue, stop_event, worker_id):
     """
     工作进程的主函数
 
@@ -37,13 +39,14 @@ def worker_process(task_queue, result_queue, worker_id):
         logger.info(f"工作进程 {worker_id} 启动成功")
 
         while True:
+            if stop_event.is_set():
+                logger.info(f"工作进程 {worker_id} 收到停止信号，结束当前轮询")
+                break
+
             try:
-                # 获取任务，超时 2 秒
-                task = task_queue.get(timeout=2)
-            except Exception:
-                # 队列为空或超时，检查是否有终止信号
-                if task_queue.empty():
-                    break
+                # 获取任务，超时后继续轮询停止信号
+                task = task_queue.get(timeout=RESULT_QUEUE_TIMEOUT)
+            except Empty:
                 continue
 
             # 终止信号
@@ -64,19 +67,6 @@ def worker_process(task_queue, result_queue, worker_id):
 
     except Exception as e:
         logger.error(f"工作进程 {worker_id} 初始化失败: {e}")
-        # 把当前队列中所有任务标记为失败
-        while not task_queue.empty():
-            try:
-                task = task_queue.get_nowait()
-                if task is not None:
-                    excel_path, output_dir, input_dir = task
-                    result_queue.put(ConversionResult(
-                        excel_path, ConversionResult.FAILED,
-                        f"工作进程启动失败: {str(e)}"
-                    ))
-            except Exception:
-                break
-
     finally:
         converter.cleanup()
         logger.info(f"工作进程 {worker_id} 已退出")
@@ -131,6 +121,8 @@ class ConversionManager:
         self._workers = []
         self._is_running = False
         self._should_stop = False
+        self._stop_event = None
+        self._was_stopped = False
 
     def start_conversion(self, input_dir, output_dir):
         """
@@ -145,15 +137,19 @@ class ConversionManager:
         """
         self._is_running = True
         self._should_stop = False
+        self._was_stopped = False
+        self._stop_event = multiprocessing.Event()
 
         # 扫描文件
         self._log(f"📂 扫描目录: {input_dir}")
         files = scan_excel_files(input_dir)
         total = len(files)
+        pending_files = set(files)
 
         if total == 0:
             self._log("⚠️ 未找到任何 Excel 文件")
             self._is_running = False
+            self._stop_event = None
             return 0, 0, 0, []
 
         self._log(f"📋 发现 {total} 个 Excel 文件")
@@ -180,8 +176,7 @@ class ConversionManager:
         for i in range(actual_workers):
             p = Process(
                 target=worker_process,
-                args=(task_queue, result_queue, i + 1),
-                daemon=True
+                args=(task_queue, result_queue, self._stop_event, i + 1),
             )
             p.start()
             self._workers.append(p)
@@ -196,48 +191,70 @@ class ConversionManager:
         start_time = time.time()
 
         while completed < total:
-            if self._should_stop:
-                self._log("⏹️ 用户请求停止转换")
-                break
-
             try:
-                result = result_queue.get(timeout=30)  # 单个文件最多等 30 秒
-                completed += 1
-                results.append(result)
-
-                if result.status == ConversionResult.SUCCESS:
-                    success_count += 1
-                    if "同名文件" in result.message:
-                        self._log(f"⚠️ [{completed}/{total}] {result.filename} - {result.message}")
-                    else:
-                        self._log(f"✅ [{completed}/{total}] {result.filename}")
-                elif result.status == ConversionResult.SKIPPED:
-                    skipped_count += 1
-                    self._log(f"⏭️ [{completed}/{total}] {result.filename} - {result.message}")
-                else:
-                    failed_count += 1
-                    self._log(f"❌ [{completed}/{total}] {result.filename} - {result.message}")
-
-                if self.progress_callback:
-                    self.progress_callback(completed, total, result)
-
-            except Exception:
-                # 超时 - 检查进程是否还活着
+                result = result_queue.get(timeout=RESULT_QUEUE_TIMEOUT)
+                completed, success_count, failed_count, skipped_count = self._record_result(
+                    result,
+                    results,
+                    pending_files,
+                    completed,
+                    total,
+                    success_count,
+                    failed_count,
+                    skipped_count,
+                )
+            except Empty:
                 alive = any(p.is_alive() for p in self._workers)
                 if not alive:
-                    self._log("⚠️ 所有工作进程已退出")
+                    if self._should_stop:
+                        self._log("⏹️ 已收到停止请求，正在汇总未处理文件...")
+                    else:
+                        self._log("⚠️ 所有工作进程已退出")
                     break
 
         elapsed = time.time() - start_time
 
+        completed, success_count, failed_count, skipped_count = self._drain_result_queue(
+            result_queue,
+            results,
+            pending_files,
+            completed,
+            total,
+            success_count,
+            failed_count,
+            skipped_count,
+        )
+
+        if pending_files:
+            if self._should_stop:
+                self._log(f"⏭️ {len(pending_files)} 个文件因用户停止而未处理")
+                status = ConversionResult.SKIPPED
+                message = "用户停止，未开始转换"
+            else:
+                self._log(f"❌ {len(pending_files)} 个文件因工作进程提前退出而未处理")
+                status = ConversionResult.FAILED
+                message = "工作进程提前退出，文件未被处理"
+
+            for filepath in sorted(pending_files):
+                synthesized = ConversionResult(filepath, status, message)
+                completed, success_count, failed_count, skipped_count = self._record_result(
+                    synthesized,
+                    results,
+                    pending_files,
+                    completed,
+                    total,
+                    success_count,
+                    failed_count,
+                    skipped_count,
+                )
+
         # 等待所有进程结束
         for p in self._workers:
-            p.join(timeout=10)
-            if p.is_alive():
-                p.terminate()
+            p.join()
 
         self._workers = []
         self._is_running = False
+        self._stop_event = None
 
         # 输出统计
         self._log(f"\n{'='*50}")
@@ -253,15 +270,90 @@ class ConversionManager:
 
     def stop(self):
         """请求停止转换"""
+        if not self._is_running:
+            return
+
         self._should_stop = True
-        self._log("🛑 正在停止转换...")
+        self._was_stopped = True
+        if self._stop_event is not None:
+            self._stop_event.set()
+        self._log("🛑 正在停止转换，等待当前文件处理完成...")
 
     @property
     def is_running(self):
         return self._is_running
+
+    @property
+    def was_stopped(self):
+        return self._was_stopped
 
     def _log(self, message):
         """输出日志"""
         if self.log_callback:
             self.log_callback(message)
         logger.info(message)
+
+    def _record_result(
+        self,
+        result,
+        results,
+        pending_files,
+        completed,
+        total,
+        success_count,
+        failed_count,
+        skipped_count,
+    ):
+        """记录单个结果，并更新计数/日志/进度。"""
+        completed += 1
+        results.append(result)
+        pending_files.discard(result.filepath)
+
+        if result.status == ConversionResult.SUCCESS:
+            success_count += 1
+            if "同名文件" in result.message:
+                self._log(f"⚠️ [{completed}/{total}] {result.filename} - {result.message}")
+            else:
+                self._log(f"✅ [{completed}/{total}] {result.filename}")
+        elif result.status == ConversionResult.SKIPPED:
+            skipped_count += 1
+            self._log(f"⏭️ [{completed}/{total}] {result.filename} - {result.message}")
+        else:
+            failed_count += 1
+            self._log(f"❌ [{completed}/{total}] {result.filename} - {result.message}")
+
+        if self.progress_callback:
+            self.progress_callback(completed, total, result)
+
+        return completed, success_count, failed_count, skipped_count
+
+    def _drain_result_queue(
+        self,
+        result_queue,
+        results,
+        pending_files,
+        completed,
+        total,
+        success_count,
+        failed_count,
+        skipped_count,
+    ):
+        """非阻塞读取结果队列中已完成但尚未处理的结果。"""
+        while True:
+            try:
+                result = result_queue.get_nowait()
+            except Empty:
+                break
+
+            completed, success_count, failed_count, skipped_count = self._record_result(
+                result,
+                results,
+                pending_files,
+                completed,
+                total,
+                success_count,
+                failed_count,
+                skipped_count,
+            )
+
+        return completed, success_count, failed_count, skipped_count

@@ -6,6 +6,62 @@
 """
 import sys, os, re
 
+
+def page_has_meaningful_content(page):
+    """与主程序保持一致的保守判定：宁可保留，也不误删。"""
+    try:
+        text = page.extract_text() or ""
+    except Exception:
+        return True, False, []
+
+    has_text = bool(re.search(r'[\w\u4e00-\u9fff]', text))
+    if has_text:
+        return True, True, []
+
+    xobj_list = []
+    try:
+        if '/Resources' in page:
+            resources = page['/Resources']
+            if '/XObject' in resources:
+                xobjects = resources['/XObject']
+                if xobjects:
+                    for key in xobjects:
+                        try:
+                            xobj = xobjects[key]
+                            obj = xobj.get_object() if hasattr(xobj, 'get_object') else xobj
+                            subtype = str(obj.get('/Subtype', '?'))
+                            xobj_list.append(f"{key}({subtype})")
+                            if subtype in ('/Image', '/Form', '/PS'):
+                                return True, has_text, xobj_list
+                        except Exception:
+                            xobj_list.append(f"{key}(错误)")
+                            return True, has_text, xobj_list
+    except Exception:
+        return True, has_text, xobj_list
+
+    try:
+        contents = page.get_contents()
+        if contents is None:
+            return False, has_text, xobj_list
+
+        if isinstance(contents, list):
+            content_bytes = b''.join(
+                stream.get_data()
+                for stream in contents
+                if stream is not None
+            )
+        else:
+            content_bytes = contents.get_data()
+
+        visible_tokens = (
+            b'BT', b' Do', b'\nDo', b' Tj', b' TJ',
+            b" '", b' "', b' S', b' s', b' f', b' f*',
+            b' F', b' B', b' B*', b' b', b' b*', b' sh',
+        )
+        return any(token in content_bytes for token in visible_tokens), has_text, xobj_list
+    except Exception:
+        return True, has_text, xobj_list
+
 # 检查 pypdf
 print("=" * 50)
 print("  PDF 空白页诊断工具")
@@ -81,43 +137,23 @@ print("-" * 50)
 
 for i, page in enumerate(reader.pages):
     text = page.extract_text() or ""
-    has_text = bool(re.search(r'[\w\u4e00-\u9fff]', text))
     text_preview = text.strip()[:80].replace('\n', ' ') if text.strip() else "(空)"
-
-    # 检查图片
-    has_real_image = False
-    xobj_list = []
-    try:
-        if '/Resources' in page:
-            resources = page['/Resources']
-            if '/XObject' in resources:
-                xobjects = resources['/XObject']
-                if xobjects:
-                    for key in xobjects:
-                        try:
-                            xobj = xobjects[key]
-                            obj = xobj.get_object() if hasattr(xobj, 'get_object') else xobj
-                            subtype = str(obj.get('/Subtype', '?'))
-                            xobj_list.append(f"{key}({subtype})")
-                            if subtype == '/Image':
-                                has_real_image = True
-                        except:
-                            xobj_list.append(f"{key}(错误)")
-    except:
-        pass
-
-    is_blank = not has_text and not has_real_image
+    has_content, has_text, xobj_list = page_has_meaningful_content(page)
+    is_blank = not has_content
     status = "🔴 空白页" if is_blank else "🟢 有内容"
 
     print(f"\n第 {i+1} 页: {status}")
     print(f"  文字: {'有' if has_text else '无'} → {text_preview}")
-    print(f"  图片: {'有' if has_real_image else '无'}")
+    print(f"  图像/矢量内容: {'有' if has_content and not has_text else '无/仅文字'}")
     if xobj_list:
         print(f"  XObject: {', '.join(xobj_list)}")
 
 print("\n" + "=" * 50)
-blank_count = sum(1 for i, p in enumerate(reader.pages) 
-                  if not bool(re.search(r'[\w\u4e00-\u9fff]', p.extract_text() or "")))
+blank_count = sum(
+    1
+    for page in reader.pages
+    if not page_has_meaningful_content(page)[0]
+)
 print(f"结论: {total} 页中有 {blank_count} 个疑似空白页")
 if blank_count > 0:
     print("如果这些空白页没有被自动删除,")
